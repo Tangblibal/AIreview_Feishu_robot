@@ -1,0 +1,1470 @@
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const formidable = require('formidable');
+const { TosClient } = require('@volcengine/tos-sdk');
+
+const PORT = process.env.PORT || 3000;
+const PUBLIC_DIR = __dirname;
+const CONFIG_PATH = path.join(__dirname, 'config', 'ai.config.json');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+const DEFAULT_CONFIG = {
+  active_provider: 'deepseek',
+  providers: {
+    openai: {
+      type: 'openai',
+      base_url: 'https://api.openai.com/v1',
+      api_key: '',
+      model: 'gpt-4o-mini',
+    },
+    anthropic: {
+      type: 'anthropic',
+      base_url: 'https://api.anthropic.com/v1',
+      api_key: '',
+      model: 'claude-3-5-sonnet-20240620',
+      version: '2023-06-01',
+    },
+    deepseek: {
+      type: 'openai',
+      base_url: 'https://api.deepseek.com/v1',
+      api_key: '',
+      model: 'deepseek-v3.2',
+    },
+    doubao: {
+      type: 'openai',
+      base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+      api_key: '',
+      model: 'doubao-pro-32k',
+    },
+    qwen: {
+      type: 'openai',
+      base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      api_key: '',
+      model: 'qwen-max',
+    },
+  },
+  stt: {
+    active_provider: 'qwen_fun_asr',
+    providers: {
+      qwen_fun_asr: {
+        type: 'dashscope-fun-asr',
+        base_url: 'https://dashscope.aliyuncs.com/api/v1',
+        api_key: '',
+        model: 'fun-asr',
+        diarization_enabled: true,
+        speaker_count: 2,
+        public_base_url: '',
+        public_path: '/uploads',
+      },
+    },
+  },
+};
+
+const mockReport = {
+  total: 72,
+  need: 68,
+  style: 76,
+  objection: 63,
+  close: 58,
+  status: '完成 · AI 已生成复盘',
+  report_markdown: `### 1. 🎯 毒辣诊断书 (Executive Diagnosis)
+
+* **综合评分**：72 分
+* **一句话定性**：销售急于成交，但价值锚点未建立，导致客户防御上升。
+* **成败关键点**：未在报价前完成风格锚定与预算区间确认。
+
+---
+
+### 2. 🧩 逐帧流程拆解 (Process Breakdown)
+
+| 阶段 | 关键对话片段 (摘要) | 导师点评（心理/策略分析） | 对成交的影响 |
+| :--- | :--- | :--- | :--- |
+| 破冰 / 迎宾 | 询问风格与用途 | 建立安全感，但缺少更深层动机追问 | 🟡减分 |
+| 需求挖掘 | “想要清透感” | 未继续挖掘具体参考与场景 | 🔴致命 |
+
+---
+
+### 3. 🌟 亮点与复用 (What Worked)
+
+* 主动给出风格方向选择，缩短客户思考路径。
+* 建议加上样片与案例提升社会认同感。`,
+  insights: [
+    {
+      title: '未深入确认客户风格偏好',
+      content: '客户提到“想要清透感”，但未追问参考风格/肤色/场景，导致套餐推荐偏模糊。',
+      logic: '未建立清晰的风格锚点与场景映射，客户无法形成确定感与安全感。',
+      script: '“清透感可以走两种路线：森系偏自然、城市偏高级。您更像哪种？我再给您对应样片，保证风格不跑偏。”',
+      tag: '风格沟通',
+    },
+    {
+      title: '预算异议后缺少下一步推进',
+      content: '客户提出“有点超预算”，未给出分级方案或付费节奏，建议补充分期/档位对比。',
+      logic: '没有提供可控选择，客户只能在“接受/拒绝”之间二选一，容易退缩。',
+      script: '“如果您更在意预算，我们有 6999/7999/9999 三档。我先按您最在意的风格挑两档，您看哪档更贴合。”',
+      tag: '异议处理',
+    },
+    {
+      title: '未明确锁档与定金动作',
+      content: '收尾仅说“可以考虑”，未提出具体档期锁定或体验券，导致成交压力不足。',
+      logic: '缺少小承诺动作，成交动能断裂，客户没有进入“已开始”的心理状态。',
+      script: '“周末档期很紧，我先帮您保留一个黄金时间段，付 500 定金即可锁档，您看要不要先占位？”',
+      tag: '成交推进',
+    },
+  ],
+};
+
+const contentTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+};
+
+function sendJson(res, status, payload) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(payload));
+}
+
+function safeJoin(base, target) {
+  const targetPath = path.normalize(path.join(base, target));
+  if (!targetPath.startsWith(base)) return null;
+  return targetPath;
+}
+
+function ensureUploadsDir() {
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+}
+
+function sanitizeFilename(name = 'audio') {
+  return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function saveUploadedFile(file) {
+  ensureUploadsDir();
+  const safeName = sanitizeFilename(file.filename || 'audio');
+  const unique = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
+  const filePath = path.join(UPLOADS_DIR, unique);
+  fs.writeFileSync(filePath, file.data);
+  return { filename: unique, path: filePath };
+}
+
+function buildTosConfigKey(tosConfig) {
+  return [
+    tosConfig.access_key,
+    tosConfig.secret_key,
+    tosConfig.region,
+    tosConfig.endpoint,
+  ].join('|');
+}
+
+let cachedTosClient = null;
+let cachedTosKey = null;
+
+function getTosClient(tosConfig) {
+  const key = buildTosConfigKey(tosConfig);
+  if (!cachedTosClient || cachedTosKey !== key) {
+    cachedTosClient = new TosClient({
+      accessKeyId: tosConfig.access_key,
+      accessKeySecret: tosConfig.secret_key,
+      region: tosConfig.region,
+      endpoint: tosConfig.endpoint,
+    });
+    cachedTosKey = key;
+  }
+  return cachedTosClient;
+}
+
+async function uploadToTos(file, tosConfig) {
+  const {
+    access_key: accessKey,
+    secret_key: secretKey,
+    bucket,
+    region,
+    endpoint,
+    key_prefix: keyPrefix = 'uploads',
+  } = tosConfig;
+
+  if (!accessKey || !secretKey || !bucket || !region || !endpoint) {
+    throw new Error('Missing TOS config');
+  }
+
+  const client = getTosClient(tosConfig);
+  const safeName = sanitizeFilename(file.filename || 'audio');
+  const objectKey = `${keyPrefix}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
+  const contentType = file.contentType || 'application/octet-stream';
+
+  await client.putObject({
+    bucket,
+    key: objectKey,
+    body: file.data,
+    contentType,
+  });
+
+  const presignExpires = tosConfig.presign_expires || 900;
+  const presignedUrl = client.getPreSignedUrl({
+    bucket,
+    key: objectKey,
+    method: 'GET',
+    expires: presignExpires,
+  });
+
+  return { objectKey, url: presignedUrl };
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function deepMerge(target, source) {
+  if (!isPlainObject(source)) return target;
+  Object.entries(source).forEach(([key, value]) => {
+    if (isPlainObject(value)) {
+      if (!isPlainObject(target[key])) {
+        target[key] = {};
+      }
+      deepMerge(target[key], value);
+      return;
+    }
+    target[key] = value;
+  });
+  return target;
+}
+
+function readEnvString(name, options = {}) {
+  const value = process.env[name];
+  if (value === undefined) return undefined;
+  if (options.allowEmpty) return value;
+  return value.trim() === '' ? undefined : value;
+}
+
+function readEnvNumber(name) {
+  const value = readEnvString(name);
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readEnvBoolean(name) {
+  const value = readEnvString(name);
+  if (value === undefined) return undefined;
+  const normalized = value.toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
+function readEnvJson(name) {
+  const value = readEnvString(name, { allowEmpty: true });
+  if (value === undefined || value.trim() === '') return undefined;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    console.warn(`[config] Failed to parse ${name} as JSON: ${error.message}`);
+    return undefined;
+  }
+}
+
+function assignIfDefined(target, key, value) {
+  if (value !== undefined) {
+    target[key] = value;
+  }
+}
+
+function ensureProvider(config, providerName) {
+  if (!config.providers) config.providers = {};
+  if (!isPlainObject(config.providers[providerName])) {
+    config.providers[providerName] = {};
+  }
+  return config.providers[providerName];
+}
+
+function ensureSttProvider(config, providerName) {
+  if (!isPlainObject(config.stt)) config.stt = {};
+  if (!isPlainObject(config.stt.providers)) config.stt.providers = {};
+  if (!isPlainObject(config.stt.providers[providerName])) {
+    config.stt.providers[providerName] = {};
+  }
+  return config.stt.providers[providerName];
+}
+
+function applyProviderEnv(config, providerName, prefix) {
+  const provider = ensureProvider(config, providerName);
+  assignIfDefined(provider, 'type', readEnvString(`${prefix}_TYPE`));
+  assignIfDefined(provider, 'base_url', readEnvString(`${prefix}_BASE_URL`));
+  assignIfDefined(provider, 'api_key', readEnvString(`${prefix}_API_KEY`, { allowEmpty: true }));
+  assignIfDefined(provider, 'model', readEnvString(`${prefix}_MODEL`));
+  assignIfDefined(provider, 'auth_header', readEnvString(`${prefix}_AUTH_HEADER`));
+  assignIfDefined(provider, 'auth_prefix', readEnvString(`${prefix}_AUTH_PREFIX`, { allowEmpty: true }));
+  assignIfDefined(provider, 'timeout_ms', readEnvNumber(`${prefix}_TIMEOUT_MS`));
+  assignIfDefined(provider, 'extra_headers', readEnvJson(`${prefix}_EXTRA_HEADERS_JSON`));
+  if (providerName === 'anthropic') {
+    assignIfDefined(provider, 'version', readEnvString('ANTHROPIC_VERSION'));
+  }
+}
+
+function applySttProviderEnv(config, providerName, prefix) {
+  const provider = ensureSttProvider(config, providerName);
+  assignIfDefined(provider, 'type', readEnvString(`${prefix}_TYPE`));
+  assignIfDefined(provider, 'base_url', readEnvString(`${prefix}_BASE_URL`));
+  assignIfDefined(provider, 'api_key', readEnvString(`${prefix}_API_KEY`, { allowEmpty: true }));
+  assignIfDefined(provider, 'model', readEnvString(`${prefix}_MODEL`));
+  assignIfDefined(provider, 'public_base_url', readEnvString(`${prefix}_PUBLIC_BASE_URL`));
+  assignIfDefined(provider, 'public_path', readEnvString(`${prefix}_PUBLIC_PATH`));
+  assignIfDefined(provider, 'poll_interval_ms', readEnvNumber(`${prefix}_POLL_INTERVAL_MS`));
+  assignIfDefined(provider, 'poll_max_attempts', readEnvNumber(`${prefix}_POLL_MAX_ATTEMPTS`));
+  assignIfDefined(provider, 'query_method', readEnvString(`${prefix}_QUERY_METHOD`));
+  assignIfDefined(provider, 'language', readEnvString(`${prefix}_LANGUAGE`));
+
+  assignIfDefined(provider, 'diarization_enabled', readEnvBoolean(`${prefix}_DIARIZATION_ENABLED`));
+  assignIfDefined(provider, 'speaker_count', readEnvNumber(`${prefix}_SPEAKER_COUNT`));
+
+  assignIfDefined(provider, 'app_id', readEnvString(`${prefix}_APP_ID`));
+  assignIfDefined(provider, 'access_token', readEnvString(`${prefix}_ACCESS_TOKEN`));
+  assignIfDefined(provider, 'secret_key', readEnvString(`${prefix}_SECRET_KEY`));
+  assignIfDefined(provider, 'resource_id', readEnvString(`${prefix}_RESOURCE_ID`));
+  assignIfDefined(provider, 'model_name', readEnvString(`${prefix}_MODEL_NAME`));
+  assignIfDefined(provider, 'uid', readEnvString(`${prefix}_UID`));
+  assignIfDefined(provider, 'audio_format', readEnvString(`${prefix}_AUDIO_FORMAT`));
+  assignIfDefined(provider, 'enable_itn', readEnvBoolean(`${prefix}_ENABLE_ITN`));
+  assignIfDefined(provider, 'enable_punc', readEnvBoolean(`${prefix}_ENABLE_PUNC`));
+  assignIfDefined(provider, 'enable_speaker_info', readEnvBoolean(`${prefix}_ENABLE_SPEAKER_INFO`));
+  assignIfDefined(provider, 'show_utterances', readEnvBoolean(`${prefix}_SHOW_UTTERANCES`));
+}
+
+function applyEnvOverrides(baseConfig) {
+  const config = deepMerge({}, baseConfig);
+
+  assignIfDefined(config, 'active_provider', readEnvString('ACTIVE_PROVIDER'));
+  applyProviderEnv(config, 'openai', 'OPENAI');
+  applyProviderEnv(config, 'anthropic', 'ANTHROPIC');
+  applyProviderEnv(config, 'deepseek', 'DEEPSEEK');
+  applyProviderEnv(config, 'doubao', 'DOUBAO');
+  applyProviderEnv(config, 'qwen', 'QWEN');
+
+  if (!isPlainObject(config.stt)) config.stt = {};
+  assignIfDefined(config.stt, 'active_provider', readEnvString('STT_ACTIVE_PROVIDER'));
+  applySttProviderEnv(config, 'doubao_asr_2', 'STT_DOUBAO_ASR_2');
+  applySttProviderEnv(config, 'qwen_fun_asr', 'STT_QWEN_FUN_ASR');
+
+  if (!isPlainObject(config.tos)) config.tos = {};
+  assignIfDefined(config.tos, 'enabled', readEnvBoolean('TOS_ENABLED'));
+  assignIfDefined(config.tos, 'bucket', readEnvString('TOS_BUCKET'));
+  assignIfDefined(config.tos, 'region', readEnvString('TOS_REGION'));
+  assignIfDefined(config.tos, 'endpoint', readEnvString('TOS_ENDPOINT'));
+  assignIfDefined(config.tos, 'access_key', readEnvString('TOS_ACCESS_KEY'));
+  assignIfDefined(config.tos, 'secret_key', readEnvString('TOS_SECRET_KEY'));
+  assignIfDefined(config.tos, 'key_prefix', readEnvString('TOS_KEY_PREFIX'));
+  assignIfDefined(config.tos, 'presign_expires', readEnvNumber('TOS_PRESIGN_EXPIRES'));
+
+  const configJsonOverride = readEnvJson('AI_CONFIG_JSON');
+  if (configJsonOverride) {
+    deepMerge(config, configJsonOverride);
+  }
+
+  return config;
+}
+
+function readConfigFile() {
+  const fileConfig = (() => {
+    try {
+      const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+      return JSON.parse(raw);
+    } catch (error) {
+      return {};
+    }
+  })();
+
+  const merged = deepMerge(deepMerge({}, DEFAULT_CONFIG), fileConfig);
+  return applyEnvOverrides(merged);
+}
+
+function getActiveProvider(config) {
+  const name = config.active_provider || 'openai';
+  const provider = config.providers?.[name];
+  if (!provider) {
+    return { name: 'openai', config: DEFAULT_CONFIG.providers.openai };
+  }
+  return { name, config: provider };
+}
+
+function getActiveSttProvider(config) {
+  const sttConfig = config.stt || {};
+  const name = sttConfig.active_provider || 'deepgram';
+  const provider = sttConfig.providers?.[name];
+  if (!provider) {
+    return { name: 'deepgram', config: null };
+  }
+  return { name, config: provider };
+}
+
+function buildPrompt(transcript, templates) {
+  const templateText = templates
+    .map((section) => `- ${section.title}: ${section.items.join('、')}`)
+    .join('\n');
+  const transcriptText = transcript || '（空）';
+  const templateBlock = templateText || '（无模板）';
+
+  return `# Role: 顶级销售实战导师 & 消费心理学教授
+(Master Sales Mentor & Behavioral Psychologist)
+
+## 1. Profile（你是谁）
+
+你不仅是拥有 20 年一线高客单价销售经验的金牌销售总监（奢侈品、汽车、婚纱摄影、医美、房产），也是一位深谙行为经济学与消费心理学的商学院教授。
+
+你具备“双重人格”：
+
+1. 实战派总监
+   - 极度敏锐，能听懂客户“没说出口的话”
+   - 痛恨空洞理论，只看结果：**成交率 / 客单价 / 复购推荐**
+
+2. 学术派教授
+   - 习惯从行为经济学和消费心理学出发，解释销售成败的根本原因
+   - 熟练运用：损失厌恶、锚定效应、社会认同、互惠原则、承诺与一致、稀缺效应等原理，解构对话中的心理博弈
+
+你说话风格：锋利、直白、不哄人。看到垃圾话术会直接指出“这是自杀式销售”。
+
+---
+
+## 2. Core Philosophy（核心哲学）
+
+你的所有分析和建议，必须严格服务于以下三个商业指标：
+
+- **成交率（Conversion Rate）**
+- **客单价（Average Order Value）**
+- **复购与转介绍（Repeat & Referral）**
+
+你拒绝：
+- “要多关心客户”“要提升服务态度”这类空话
+你只提供：
+- “下一句具体该怎么说”
+- “这个阶段应该多问哪三个问题”
+- “这类客户应该用哪种成交路径”
+
+---
+
+## 3. Context & Task（场景与任务）
+
+用户会提供一份 **线下门店接待销售对话记录**（通常来自录音转写 / PDF，已区分说话人）。行业多为：摄影工作室 / 美业 / 高客单体验店等；如有特写，以用户说明为准。
+
+你的任务是：
+像给你的亲传弟子做复盘一样，**对这份对话进行“全维度尸检级拆解”**：
+
+- 指出哪里是「自杀式销售」
+- 哪里是「神来之笔」
+- 为什么会这样（背后是哪个心理机制在起作用）
+- 该如何修正，才能实实在在提高成交率和客单价
+
+---
+
+## 4. Input Format（期望用户提供的信息）
+
+用户后续可能会以文字 / PDF 转写的形式提供对话。请默认按下列结构理解输入（有些字段可能为空，你也要能工作）：
+
+1. 门店与产品背景（可选）
+   - 行业与门店类型（如：男士写真摄影工作室）
+   - 主打客群（性别 / 年龄段 / 消费层级）
+   - 主推产品或套餐价位区间（如：起拍 599，主推 3999–6999）
+   - 当下门店目标（提高成交率 / 拉高客单 / 提升加片率 等）
+
+2. 本次顾客与结果
+   - 顾客基本画像：性别、年龄区间、是否独自前来 / 带伴侣 / 带家人
+   - 本次接待结果：是否成交？成交价格与产品？如未成交，离店时的表面理由
+   - 服务该顾客的销售是新人 / 中阶 / 老销售（如果有）
+
+3. 本次接待的预期目标（可选）
+   - 例如：目标签 3999 套餐，底线 1999；
+   - 或：老客复购，目标升级高客单等
+
+4. 完整销售对话
+   - 以清晰区分说话人的形式提供，例如：
+     - 【S】：销售
+     - 【C】：客户
+   - 如果来源是 PDF，请视为已经转写为文本或由系统自动抽取
+
+5. 其他补充信息（可选）
+   - 当时门店客流情况、时间压力
+   - 是否有活动价 / 团购价
+   - 是否存在硬性话术规定
+
+---
+
+## 5. Analytical Framework（你的思考流程）
+
+在输出回答前，请在内部按以下步骤进行深度思考（**无需展示推理过程，只展示最后的结论与报告结构**）：
+
+1. 画像侧写（Client & Sales Profiling）
+   - 根据对话，判断客户类型：
+     - 价格敏感型 / 体验享受型 / 信息搜集型 / 陪同决策型 / 已有强需求但不信任型 等
+   - 判断销售员段位：
+     - 话术生硬、节奏混乱 → 小白
+     - 流程完整但缺乏深度 → 中阶
+     - 会主动设计节奏与情绪 → 高手或以上
+
+2. 流程扫描（Against Standard SOP）
+   - 对比经典销售路径：
+     **破冰 → 建立安全感与信任 → 挖掘动机与痛点 → 定制化呈现方案与价值 → 报价与锚定 → 异议处理 → 成交 / 收口与铺垫复购**
+   - 查找：
+     - 哪些环节完全缺失？
+     - 哪些环节顺序错乱或过早暴露价格？
+     - 哪些地方“讲太多”但没让客户开口？
+
+3. 心理博弈轨迹（Power & Psychology Dynamics）
+   - 分析每个关键回合：
+     - 此刻谁在高位？（掌控节奏的一方）
+     - 谁在低位？（被动解释、一直辩解的一方）
+   - 标记：
+     - 哪一句话让客户的防御明显上升？
+     - 哪一句话成功建立了信任或价值锚点？
+
+4. 行为经济学视角
+   - 判断本次对话中是否合理利用或错用：
+     - 锚定效应：是否先建立了“价值锚点”再报价格？
+     - 损失厌恶：是否让客户意识到“不做这个决策会失去什么”？
+     - 社会认同：是否合理引用案例 / 其他客户选择？
+     - 稀缺效应：是否虚假或过度使用“仅限今天/名额不多”，导致反感？
+     - 互惠原则：是否先提供价值，还是一上来就索取？
+
+5. 找出 1–3 个关键杠杆点（Leverage Points）
+   - 如果只改对话中三个节点，最可能直接拉高成交率的，会是哪三处？
+   - 这些节点将作为后面“话术重构”与“训练重点”的核心。
+
+---
+
+## 6. Output Structure（严格按以下格式输出报告）
+
+### 1. 🎯 毒辣诊断书 (Executive Diagnosis)
+
+* **综合评分**：0–100 分（直接给分，80 以上为可复制模板，60 以下为问题较多，40 以下为高危）
+* **一句话定性**：
+  用犀利直白的语言概括这次接待，例如：
+  - “这是一场从一开始就站在被告席上的销售，全程在被客户审讯。”
+  - “销售太急着证明自己专业，却从未证明自己‘懂客户’。”
+* **成败关键点**：
+  用 1 句话点名当前结果的核心原因：
+  - 是信任没建立？
+  - 是价值没讲透？
+  - 是过早报价格导致防御拉满？
+  - 还是逼单太软 / 完全不敢收口？
+
+---
+
+### 2. 🧩 逐帧流程拆解 (Process Breakdown)
+
+请绘制一个表格，对关键对话节点进行点评：
+
+| 阶段 | 关键对话片段 (摘要) | 导师点评（心理/策略分析） | 对成交的影响 |
+| :--- | :--- | :--- | :--- |
+| 破冰 / 迎宾 | *简要引用原话或概括* | *销售此时的意图 vs 客户实际感受；是否建立安全感* | 🔴致命 / 🟡减分 / 🟢加分 |
+| 需求挖掘 | ... | ... | ... |
+| 方案呈现 | ... | ... | ... |
+| 报价/锚定 | ... | ... | ... |
+| 异议处理 | ... | ... | ... |
+| 逼单收口 | ... | ... | ... |
+| 收尾/铺垫复购 | ... | ... | ... |
+
+要求：
+- 不要逐句流水账，而是抓关键节点
+- 每个点评都要包含：**销售动机猜测 + 客户心理感受 + 心理位置变化**
+
+---
+
+### 3. 🌟 亮点与复用 (What Worked)
+
+* 挑出 **2–3 个值得全店推广的亮点**（可以是某句话、某个节奏、某个态度）。
+* 对每个亮点，必须回答三点：
+  1. 具体是哪一句 / 哪个动作？
+  2. 它满足了客户哪种心理需求？（例如：安全感、被理解感、控制感、占便宜感）
+  3. 建议如何在全店范围内标准化复用？（写成一句 SOP 式话术或一个动作）
+
+---
+
+### 4. 🔪 手术刀式话术重构 (Script Optimization) —— 最重要部分
+
+针对对话中出现的 **3–4 个严重错误节点**（例如：错误的提问方式、生硬报价、无效安抚、把路人聊成敌人），逐一进行“换头手术”。
+
+每个错误节点按以下格式输出：
+
+1) **错误点**：用一句话点名问题本质
+   - 例如：“在完全不了解客户真实预算之前就直接丢出底价，是自杀式报价。”
+
+* ❌ 原文糟糕示范：
+  > 引用原始对话中销售的原话（简要即可）
+
+* ✅ 导师金牌话术（如果你在现场，你会怎么说）：
+  > 写出一段可直接在门店使用的口语化话术，要求：
+  > - 有逻辑、有情绪、有姿态
+  > - 能兼顾客户感受与成交目标
+  > - 不虚假、不油腻，但有“杀伤力”
+
+* 💡 底层逻辑（心理学解释）：
+  - 说明这段话术如何利用了哪一两个心理学机制：
+    - 如：锚定效应、损失厌恶、互惠原则、社会认同、赋予选择感等
+  - 解释：为什么这样说，客户更容易点头？更不容易升起防御？
+
+对所有严重错误节点，都按这一结构展开（3–4 个为宜，宁少但深）。
+
+---
+
+### 5. 🛠️ 门店落地训练方案 (Actionable Training)
+
+为避免这份复盘沦为“看完就算”，请直接给店长 / 管理层输出可执行的训练与 SOP 建议：
+
+1. **明日早会练什么？（Role-Play 设计）**
+   - 给出 1–2 个可直接拿来演的角色扮演场景，例如：
+     - “客户说‘太贵了，我再考虑一下’时，全员轮流说出自己的回答版本，由店长评估谁的话术更好。”
+   - 写清楚：
+     - 场景设定
+     - 销售目标（比如：至少锁定预约，或留下联系方式）
+     - 评价标准（是否缓和防御、是否重建价值感等）
+
+2. **SOP 修正建议**
+   - 明确指出：
+     - 现有话术本 / 接待流程中，哪两三条是“必须立刻修改”的？
+   - 直接给出修正版 SOP 示例，例如：
+     - “禁止在未了解客户使用场景前直接报价”
+     - “每次报价前必须先完成以下三步：A、确认需求场景；B、建立一个高于实际报价的价值锚点；C、询问客户对预算的大致接受区间”
+
+如有必要，可以建议：
+- 统一一套「必问问题清单」
+- 统一几段「应对常见异议」的标准话术
+- 规划一周内可以完成的小规模训练计划
+
+---
+
+## 7. Constraints & Tone（约束与语气）
+
+- **语气**：严厉、专业、一针见血。
+  - 避免使用：“你已经做得很好了，但是……”这种 AI 式安慰句。
+  - 如果是垃圾话术，请直接点名：“这是垃圾话术”“这是明显的自杀式操作”。
+
+- **细节**：
+  - 不说“要多挖掘需求”，要直接给出**三句可以用来挖需求的问题**。
+  - 不说“要提升服务意识”，要说明**在某一轮对话中应该如何改说下一句**。
+
+- **立场**：
+  - 你永远站在“帮门店赚钱、帮销售成长”的立场上
+  - 既不讨好顾客，也不纵容销售的懒惰
+
+---
+
+## 8. Initialization（初始化回答）
+
+当用户第一次发送对话内容（或说明已上传文件）时，请先回复：
+
+“销售导师已就位。请发送本次接待的基础信息和完整对话内容（或转写后的文字），我将为你出一份刀刀见骨的销售复盘报告。”
+
+随后，严格按照上述 Output Structure 输出分析。
+
+---
+
+## 系统提供的输入
+
+复盘模板：
+${templateBlock}
+
+对话转写：
+${transcriptText}
+
+---
+
+【输出要求】
+必须输出 JSON（不要输出多余文本），结构如下：
+{
+  "total": number,
+  "need": number,
+  "style": number,
+  "objection": number,
+  "close": number,
+  "status": string,
+  "insights": [
+    { "title": string, "content": string, "logic": string, "script": string, "tag": string }
+  ],
+  "report_markdown": string
+}
+
+说明：
+- report_markdown 必须严格按上面的 Output Structure 组织为 Markdown。
+- insights 中每一项必须包含 logic（底层逻辑分析）与 script（满分话术模板）。
+- 如果对话转写为空或信息不足，请在 status 中明确说明，insights 置空，report_markdown 说明信息不足。`;
+}
+
+function buildAuthHeaders(provider) {
+  const headers = { 'Content-Type': 'application/json' };
+  const authHeader = provider.auth_header || 'Authorization';
+  const authPrefix = provider.auth_prefix === undefined ? 'Bearer ' : provider.auth_prefix;
+  if (provider.api_key) {
+    headers[authHeader] = `${authPrefix}${provider.api_key}`;
+  }
+  if (provider.extra_headers && typeof provider.extra_headers === 'object') {
+    Object.assign(headers, provider.extra_headers);
+  }
+  return headers;
+}
+
+function buildPublicFileUrl(provider, filename) {
+  const base = provider.public_base_url;
+  if (!base) {
+    throw new Error('Missing public_base_url for STT provider. A public file URL is required.');
+  }
+  const publicPath = provider.public_path || '/uploads';
+  const pathSegment = publicPath.startsWith('/') ? publicPath : `/${publicPath}`;
+  return `${base.replace(/\/$/, '')}${pathSegment}/${encodeURIComponent(filename)}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function stripCodeFences(text) {
+  return text
+    .replace(/```json/gi, '```')
+    .replace(/```/g, '')
+    .trim();
+}
+
+function extractFirstJson(text) {
+  const cleaned = stripCodeFences(text);
+  const startIndex = cleaned.search(/[\{\[]/);
+  if (startIndex === -1) {
+    throw new Error('No JSON object found in model response.');
+  }
+  const openChar = cleaned[startIndex];
+  const closeChar = openChar === '{' ? '}' : ']';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startIndex; i < cleaned.length; i += 1) {
+    const char = cleaned[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === openChar) depth += 1;
+    if (char === closeChar) depth -= 1;
+    if (depth === 0) {
+      const jsonText = cleaned.slice(startIndex, i + 1);
+      return JSON.parse(jsonText);
+    }
+  }
+  throw new Error('Incomplete JSON in model response.');
+}
+
+function parseModelJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    try {
+      return extractFirstJson(text);
+    } catch (innerError) {
+      const cleaned = stripCodeFences(text).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+      try {
+        return JSON.parse(cleaned);
+      } catch (finalError) {
+        return extractFirstJson(cleaned);
+      }
+    }
+  }
+}
+
+async function callOpenAICompatible({ provider, prompt }) {
+  const baseUrl = provider.base_url || 'https://api.openai.com/v1';
+  const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+  const payload = {
+    model: provider.model || 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: '你是销售复盘专家，请严格输出 JSON。' },
+      { role: 'user', content: prompt },
+    ],
+    temperature: 0.2,
+  };
+
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: buildAuthHeaders(provider),
+      body: JSON.stringify(payload),
+    },
+    provider.timeout_ms || 600000,
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`OpenAI-compatible API error: ${response.status} ${errorText}`.trim());
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error('OpenAI-compatible response missing content');
+  return parseModelJson(text);
+}
+
+async function callAnthropic({ provider, prompt }) {
+  const baseUrl = provider.base_url || 'https://api.anthropic.com/v1';
+  const url = `${baseUrl.replace(/\/$/, '')}/messages`;
+  const payload = {
+    model: provider.model || 'claude-3-5-sonnet-20240620',
+    max_tokens: 900,
+    system: '你是销售复盘专家，请严格输出 JSON。',
+    messages: [{ role: 'user', content: prompt }],
+  };
+
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'x-api-key': provider.api_key,
+        'anthropic-version': provider.version || '2023-06-01',
+        'Content-Type': 'application/json',
+        ...(provider.extra_headers || {}),
+      },
+      body: JSON.stringify(payload),
+    },
+    provider.timeout_ms || 600000,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Anthropic API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data?.content?.[0]?.text;
+  if (!text) throw new Error('Anthropic API response missing content');
+  return parseModelJson(text);
+}
+
+function splitBuffer(buffer, separator) {
+  const parts = [];
+  let start = 0;
+  let index = buffer.indexOf(separator, start);
+  while (index !== -1) {
+    parts.push(buffer.slice(start, index));
+    start = index + separator.length;
+    index = buffer.indexOf(separator, start);
+  }
+  parts.push(buffer.slice(start));
+  return parts;
+}
+
+function parseMultipart(buffer, boundary) {
+  const results = { fields: {}, files: {} };
+  const boundaryBuffer = Buffer.from(boundary);
+  const parts = splitBuffer(buffer, boundaryBuffer);
+
+  parts.forEach((part) => {
+    if (!part.length) return;
+    if (part.equals(Buffer.from('--\r\n')) || part.equals(Buffer.from('--'))) return;
+    let cleaned = part;
+    if (cleaned.startsWith(Buffer.from('\r\n'))) {
+      cleaned = cleaned.slice(2);
+    } else if (cleaned.startsWith(Buffer.from('\n'))) {
+      cleaned = cleaned.slice(1);
+    }
+    const headerEnd = cleaned.indexOf('\r\n\r\n');
+    if (headerEnd === -1) return;
+    const headerText = cleaned.slice(0, headerEnd).toString('utf8');
+    let body = cleaned.slice(headerEnd + 4);
+    if (body.endsWith(Buffer.from('\r\n'))) {
+      body = body.slice(0, -2);
+    } else if (body.endsWith(Buffer.from('\n'))) {
+      body = body.slice(0, -1);
+    }
+
+    const dispositionMatch = headerText.match(/content-disposition:.*name=\"([^\"]+)\"(?:; filename=\"([^\"]+)\")?/i);
+    const typeMatch = headerText.match(/content-type:\\s*([^\\r\\n]+)/i);
+    if (!dispositionMatch) return;
+    const name = dispositionMatch[1];
+    const filename = dispositionMatch[2];
+    if (filename) {
+      results.files[name] = {
+        filename,
+        contentType: typeMatch ? typeMatch[1] : 'application/octet-stream',
+        data: body,
+      };
+    } else {
+      results.fields[name] = body.toString('utf8');
+    }
+  });
+
+  return results;
+}
+
+function normalizeUtterances(rawUtterances = [], fallbackWords = []) {
+  if (rawUtterances.length) {
+    return rawUtterances.map((utterance) => ({
+      speaker: Number.parseInt(
+        utterance.speaker ??
+          utterance.speaker_id ??
+          utterance.speakerId ??
+          utterance.channel_id ??
+          utterance.channelId ??
+          utterance?.additions?.speaker_id ??
+          0,
+        10,
+      ),
+      start: utterance.start,
+      end: utterance.end,
+      text: utterance.transcript || utterance.text || '',
+    }));
+  }
+
+  if (!fallbackWords.length) return [];
+  const grouped = [];
+  let current = null;
+  fallbackWords.forEach((word) => {
+    const speaker = word.speaker ?? 0;
+    if (!current || current.speaker !== speaker) {
+      if (current) grouped.push(current);
+      current = {
+        speaker,
+        start: word.start,
+        end: word.end,
+        text: word.word || word.text || '',
+      };
+    } else {
+      current.text = `${current.text} ${word.word || word.text || ''}`.trim();
+      current.end = word.end;
+    }
+  });
+  if (current) grouped.push(current);
+  return grouped;
+}
+
+function labelUtterances(utterances) {
+  return utterances.map((item) => {
+    let role = 'client';
+    if (item.speaker === 0) role = 'sales';
+    if (item.speaker > 1) role = 'other';
+    return { ...item, role };
+  });
+}
+
+function buildTranscript(utterances) {
+  return utterances
+    .map((item) => {
+      const label = item.role === 'sales' ? '销售' : item.role === 'client' ? '客户' : `发言者${item.speaker}`;
+      return `${label}: ${item.text}`.trim();
+    })
+    .join('\n');
+}
+
+async function transcribeWithDeepgram(provider, file) {
+  const params = new URLSearchParams();
+  if (provider.model) params.set('model', provider.model);
+  if (provider.language) params.set('language', provider.language);
+  if (provider.diarize) params.set('diarize', 'true');
+  if (provider.utterances) params.set('utterances', 'true');
+  if (provider.punctuate) params.set('punctuate', 'true');
+  if (provider.smart_format) params.set('smart_format', 'true');
+
+  const baseUrl = provider.base_url || 'https://api.deepgram.com/v1/listen';
+  const url = `${baseUrl.replace(/\\?$/, '')}?${params.toString()}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Token ${provider.api_key}`,
+      'Content-Type': file.contentType || 'application/octet-stream',
+    },
+    body: file.data,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Deepgram API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const alt = data?.results?.channels?.[0]?.alternatives?.[0] || {};
+  return {
+    transcript: alt.transcript || '',
+    utterances: alt.utterances || data?.results?.utterances || [],
+    words: alt.words || [],
+  };
+}
+
+function extractDashScopeTranscript(resultJson) {
+  const transcripts = resultJson?.transcripts || resultJson?.result?.transcripts || [];
+  const transcriptText = transcripts.map((item) => item.text || '').filter(Boolean).join('\n');
+  const utterances = [];
+  transcripts.forEach((item) => {
+    const sentences = item.sentences || [];
+    sentences.forEach((sentence) => {
+      utterances.push({
+        speaker: sentence.speaker_id ?? sentence.speakerId ?? 0,
+        start: sentence.begin_time ? sentence.begin_time / 1000 : undefined,
+        end: sentence.end_time ? sentence.end_time / 1000 : undefined,
+        text: sentence.text || '',
+      });
+    });
+  });
+  return { transcript: transcriptText, utterances };
+}
+
+function inferAudioFormat(file) {
+  const name = file.filename || '';
+  const ext = path.extname(name).toLowerCase().replace('.', '');
+  if (ext) return ext;
+  const contentType = file.contentType || '';
+  if (contentType.includes('mpeg')) return 'mp3';
+  if (contentType.includes('wav')) return 'wav';
+  if (contentType.includes('mp4') || contentType.includes('m4a')) return 'm4a';
+  if (contentType.includes('aac')) return 'aac';
+  if (contentType.includes('flac')) return 'flac';
+  if (contentType.includes('ogg')) return 'ogg';
+  return 'mp3';
+}
+
+function buildVolcengineHeaders(provider, requestId) {
+  return {
+    'Content-Type': 'application/json',
+    'X-Api-App-Key': provider.app_id,
+    'X-Api-Access-Key': provider.access_token,
+    'X-Api-Resource-Id': provider.resource_id || 'volc.seedasr.auc',
+    'X-Api-Request-Id': requestId,
+    'X-Api-Sequence': '-1',
+  };
+}
+
+function extractVolcengineResult(result) {
+  const text = result?.text || '';
+  const utterances = (result?.utterances || []).map((item) => ({
+    speaker: item.speaker_id ?? item.speakerId ?? item.speaker ?? item.channel_id ?? item.channelId ?? 0,
+    start: item.start_time !== undefined ? item.start_time / 1000 : item.start,
+    end: item.end_time !== undefined ? item.end_time / 1000 : item.end,
+    text: item.text || '',
+  }));
+  return { transcript: text, utterances, words: [] };
+}
+
+async function submitVolcengineAsr2(provider, fileInfo, requestId) {
+  const baseUrl = provider.base_url || 'https://openspeech.bytedance.com/api/v3/auc/bigmodel';
+  const submitUrl = `${baseUrl.replace(/\/$/, '')}/submit`;
+  const audioUrl = fileInfo.publicUrl || buildPublicFileUrl(provider, fileInfo.filename);
+  const payload = {
+    user: { uid: provider.uid || provider.app_id || 'uid' },
+    audio: {
+      url: audioUrl,
+      format: provider.audio_format || inferAudioFormat(fileInfo),
+      language: provider.language,
+    },
+    request: {
+      model_name: provider.model_name || 'bigmodel',
+      enable_itn: provider.enable_itn !== false,
+      enable_punc: provider.enable_punc !== false,
+      enable_speaker_info: provider.enable_speaker_info !== false,
+      show_utterances: provider.show_utterances !== false,
+    },
+  };
+
+  const response = await fetch(submitUrl, {
+    method: 'POST',
+    headers: buildVolcengineHeaders(provider, requestId),
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Volcengine submit error: ${response.status}`);
+  }
+
+  const code = response.headers.get('x-api-status-code');
+  if (code && code !== '20000000') {
+    const message = response.headers.get('x-api-message') || 'Volcengine submit failed';
+    throw new Error(`${message} (${code})`);
+  }
+}
+
+async function pollVolcengineAsr2(provider, requestId) {
+  const baseUrl = provider.base_url || 'https://openspeech.bytedance.com/api/v3/auc/bigmodel';
+  const queryUrl = `${baseUrl.replace(/\/$/, '')}/query`;
+  const maxAttempts = provider.poll_max_attempts || 40;
+  const interval = provider.poll_interval_ms || 2000;
+  let lastData = null;
+  let lastCode = null;
+  let lastMessage = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const response = await fetch(queryUrl, {
+      method: 'POST',
+      headers: buildVolcengineHeaders(provider, requestId),
+      body: JSON.stringify({}),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Volcengine query error: ${response.status}`);
+    }
+
+    const data = await response.json().catch(() => ({}));
+    lastData = data;
+    const result = Array.isArray(data?.result) ? data.result[0] : data?.result;
+    if (result) {
+      const text = typeof result.text === 'string' ? result.text : '';
+      const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+      const status = `${result.status || data.status || ''}`.toLowerCase();
+      if (status.includes('fail') || status.includes('error')) {
+        throw new Error(`Volcengine ASR failed: ${status}`);
+      }
+      if (text.trim().length > 0 || utterances.length > 0) {
+        return { data, result: extractVolcengineResult(result) };
+      }
+    }
+
+    const code = response.headers.get('x-api-status-code');
+    lastCode = code;
+    if (code && code !== '20000000') {
+      const message = response.headers.get('x-api-message') || 'Volcengine query failed';
+      lastMessage = message;
+      const lowerMessage = message.toLowerCase();
+      if (code === '20000001' || lowerMessage.includes('processing')) {
+        await sleep(interval);
+        continue;
+      }
+      throw new Error(`${message} (${code})`);
+    }
+
+    await sleep(interval);
+  }
+
+  const timeoutError = new Error('Volcengine ASR timeout or empty result');
+  timeoutError.debug = {
+    requestId,
+    lastCode,
+    lastMessage,
+    lastData,
+  };
+  throw timeoutError;
+}
+
+async function transcribeWithVolcengineAsr2(provider, fileInfo) {
+  if (!provider.app_id || !provider.access_token) {
+    throw new Error('Missing Volcengine app_id or access_token');
+  }
+  const requestId = crypto.randomUUID();
+  await submitVolcengineAsr2(provider, fileInfo, requestId);
+  const result = await pollVolcengineAsr2(provider, requestId);
+  return {
+    ...result.result,
+    debug: {
+      requestId,
+      raw: result.data,
+    },
+  };
+}
+
+async function pollDashScopeTask(provider, taskId) {
+  const baseUrl = provider.base_url || 'https://dashscope.aliyuncs.com/api/v1';
+  const url = `${baseUrl.replace(/\/$/, '')}/tasks/${taskId}`;
+  const headers = buildAuthHeaders(provider);
+  const maxAttempts = provider.poll_max_attempts || 30;
+  const interval = provider.poll_interval_ms || 2000;
+  const primaryMethod = provider.query_method || 'POST';
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let response = await fetch(url, {
+      method: primaryMethod,
+      headers,
+    });
+    if (!response.ok && primaryMethod !== 'GET') {
+      response = await fetch(url, {
+        method: 'GET',
+        headers,
+      });
+    }
+    if (!response.ok) {
+      throw new Error(`DashScope task query error: ${response.status}`);
+    }
+    const data = await response.json();
+    const status =
+      data?.output?.task_status || data?.output?.taskStatus || data?.task_status || data?.taskStatus || '';
+    if (status === 'SUCCEEDED') {
+      return data;
+    }
+    if (status === 'FAILED') {
+      throw new Error('DashScope task failed');
+    }
+    await sleep(interval);
+  }
+
+  throw new Error('DashScope task timeout');
+}
+
+async function transcribeWithDashScopeFunAsr(provider, fileInfo) {
+  const fileUrl = fileInfo.publicUrl || buildPublicFileUrl(provider, fileInfo.filename);
+  const baseUrl = provider.base_url || 'https://dashscope.aliyuncs.com/api/v1';
+  const submitUrl = `${baseUrl.replace(/\/$/, '')}/services/audio/asr/transcription`;
+  const payload = {
+    model: provider.model || 'fun-asr',
+    input: { file_urls: [fileUrl] },
+    parameters: {
+      diarization_enabled: provider.diarization_enabled !== false,
+      speaker_count: provider.speaker_count || 2,
+    },
+  };
+
+  const response = await fetch(submitUrl, {
+    method: 'POST',
+    headers: {
+      ...buildAuthHeaders(provider),
+      'X-DashScope-Async': 'enable',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(`DashScope submit error: ${response.status}`);
+  }
+
+  const submitData = await response.json();
+  const taskId =
+    submitData?.output?.task_id || submitData?.output?.taskId || submitData?.task_id || submitData?.taskId;
+  if (!taskId) {
+    throw new Error('DashScope task_id missing');
+  }
+
+  const taskData = await pollDashScopeTask(provider, taskId);
+  const results = taskData?.output?.results || [];
+  const transcriptionUrl = results[0]?.transcription_url || results[0]?.transcriptionUrl;
+  if (!transcriptionUrl) {
+    return { transcript: '', utterances: [], words: [] };
+  }
+
+  const transcriptionResponse = await fetch(transcriptionUrl);
+  if (!transcriptionResponse.ok) {
+    throw new Error(`DashScope transcription fetch error: ${transcriptionResponse.status}`);
+  }
+  const transcriptionJson = await transcriptionResponse.json();
+  const { transcript, utterances } = extractDashScopeTranscript(transcriptionJson);
+  return { transcript, utterances, words: [] };
+}
+
+async function transcribeAudio(config, file) {
+  const { config: provider } = getActiveSttProvider(config);
+  if (!provider) {
+    throw new Error('Missing STT config');
+  }
+
+  if (provider.type === 'deepgram') {
+    if (!provider.api_key) {
+      throw new Error('Missing Deepgram API key');
+    }
+    return transcribeWithDeepgram(provider, file);
+  }
+  if (provider.type === 'dashscope-fun-asr') {
+    if (!provider.api_key) {
+      throw new Error('Missing DashScope API key');
+    }
+    return transcribeWithDashScopeFunAsr(provider, file);
+  }
+  if (provider.type === 'volcengine-asr2') {
+    return transcribeWithVolcengineAsr2(provider, file);
+  }
+
+  throw new Error(`Unsupported STT provider: ${provider.type}`);
+}
+
+function collectBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+    });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+function collectBodyBuffer(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function parseMultipartForm(req) {
+  return new Promise((resolve, reject) => {
+    const { IncomingForm } = formidable;
+    const form = new IncomingForm({
+      multiples: false,
+      keepExtensions: true,
+      maxFileSize: 200 * 1024 * 1024,
+    });
+    form.parse(req, (err, fields, files) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve({ fields, files });
+    });
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === '/api/health') {
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (url.pathname === '/api/review' && req.method === 'POST') {
+    try {
+      const { fields, files } = await parseMultipartForm(req);
+      let audioFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
+      if (!audioFile) {
+        const firstKey = Object.keys(files)[0];
+        const firstFile = firstKey ? files[firstKey] : null;
+        audioFile = Array.isArray(firstFile) ? firstFile[0] : firstFile;
+      }
+      if (!audioFile) {
+        return sendJson(res, 400, {
+          ok: false,
+          message: 'Missing audio file.',
+          debug: {
+            contentType: req.headers['content-type'] || '',
+            fileKeys: Object.keys(files || {}),
+            fieldKeys: Object.keys(fields || {}),
+          },
+        });
+      }
+
+      const fileBuffer = fs.readFileSync(audioFile.filepath);
+      const file = {
+        filename: audioFile.originalFilename || 'audio',
+        contentType: audioFile.mimetype || 'application/octet-stream',
+        data: fileBuffer,
+      };
+
+      let templates = [];
+      if (fields.templates) {
+        try {
+          const rawTemplates = Array.isArray(fields.templates) ? fields.templates[0] : fields.templates;
+          templates = JSON.parse(rawTemplates);
+        } catch (error) {
+          templates = [];
+        }
+      }
+      const config = readConfigFile();
+      const savedFile = saveUploadedFile(file);
+      let fileInfo = { ...file, ...savedFile };
+      if (config.tos?.enabled) {
+        const uploaded = await uploadToTos(fileInfo, config.tos);
+        fileInfo = { ...fileInfo, publicUrl: uploaded.url, tosObjectKey: uploaded.objectKey };
+      }
+      const sttResult = await transcribeAudio(config, fileInfo);
+      const normalized = normalizeUtterances(sttResult.utterances, sttResult.words);
+      const labeled = labelUtterances(normalized);
+      const transcript = buildTranscript(labeled) || sttResult.transcript || '';
+
+      const prompt = buildPrompt(transcript, templates);
+      const { config: provider } = getActiveProvider(config);
+      let report;
+      if (provider.type === 'anthropic') {
+        report = await callAnthropic({ provider, prompt });
+      } else {
+        report = await callOpenAICompatible({ provider, prompt });
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        report,
+        transcript,
+        utterances: labeled,
+        stt_debug: {
+          ...sttResult.debug,
+          file: {
+            filename: fileInfo.filename,
+            contentType: fileInfo.contentType,
+            size: fileInfo.data?.length || 0,
+            publicUrl: fileInfo.publicUrl,
+            tosObjectKey: fileInfo.tosObjectKey,
+          },
+        },
+      });
+    } catch (error) {
+      return sendJson(res, 200, {
+        ok: false,
+        message: error.message,
+        stt_debug: error.debug,
+      });
+    }
+  }
+
+  if (url.pathname === '/api/analyze' && req.method === 'POST') {
+    try {
+      const raw = await collectBody(req);
+      const body = JSON.parse(raw || '{}');
+      const config = readConfigFile();
+      const { config: provider } = getActiveProvider(config);
+
+      if (!provider?.api_key) {
+        return sendJson(res, 200, { ok: true, report: mockReport, message: 'Missing API key, fallback to mock.' });
+      }
+
+      const prompt = buildPrompt(body.transcript || '', body.templates || []);
+      let report;
+
+      if (provider.type === 'anthropic') {
+        report = await callAnthropic({ provider, prompt });
+      } else {
+        report = await callOpenAICompatible({ provider, prompt });
+      }
+
+      return sendJson(res, 200, { ok: true, report });
+    } catch (error) {
+      return sendJson(res, 200, { ok: true, report: mockReport, message: error.message });
+    }
+  }
+
+  const filePath = url.pathname === '/' ? '/index.html' : url.pathname;
+  const fullPath = safeJoin(PUBLIC_DIR, filePath);
+  if (!fullPath) {
+    res.writeHead(403);
+    return res.end('Forbidden');
+  }
+
+  fs.readFile(fullPath, (err, content) => {
+    if (err) {
+      res.writeHead(404);
+      return res.end('Not found');
+    }
+    const ext = path.extname(fullPath);
+    res.writeHead(200, { 'Content-Type': contentTypes[ext] || 'text/plain' });
+    res.end(content);
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});

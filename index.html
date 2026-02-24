@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>光影复盘 · 摄影写真销售复盘机器人</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg"></div>
+    <div class="grain"></div>
+
+    <header class="nav">
+      <div class="brand">
+        <div class="logo">LUMO</div>
+        <div class="brand-text">
+          <div class="brand-name">光影复盘</div>
+          <div class="brand-tag">摄影写真行业 · AI 销售复盘机器人</div>
+        </div>
+      </div>
+      <nav class="nav-links">
+        <button class="ghost">产品</button>
+        <button class="ghost">行业洞察</button>
+        <button class="ghost">模板中心</button>
+        <button class="cta">预约演示</button>
+      </nav>
+    </header>
+
+    <main class="layout" id="report">
+      <section class="hero">
+        <div class="hero-left">
+          <p class="eyebrow">专为摄影写真门店打造</p>
+          <h1>把每一次咨询，变成更精准的风格成交</h1>
+          <p class="lead">
+            识别咨询流程、风格偏好、异议处理与成交动作，自动输出可执行的复盘建议与话术改进。
+          </p>
+          <div class="hero-actions">
+            <button class="cta" id="quickDemo">一键演示</button>
+            <button class="ghost" id="exportPdf">导出 PDF 报告</button>
+          </div>
+          <div class="hero-metrics">
+            <div>
+              <strong>2-5 分钟</strong>
+              <span>单通复盘</span>
+            </div>
+            <div>
+              <strong>80%+</strong>
+              <span>流程识别率</span>
+            </div>
+            <div>
+              <strong>60%+</strong>
+              <span>建议采纳率</span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-right">
+          <div class="glass-card upload-card">
+            <div class="card-title">上传销售录音</div>
+            <p class="card-sub">支持 mp3 / wav / m4a · 自动分离客户/销售</p>
+            <label class="upload-area" for="audioUpload">
+              <input id="audioUpload" type="file" accept="audio/*" />
+              <div class="upload-icon">♫</div>
+              <div class="upload-text">拖拽或点击上传销售录音</div>
+              <div class="upload-hint">摄影写真咨询 · 套餐报价 · 档期沟通</div>
+            </label>
+            <div class="upload-actions">
+              <button class="cta" id="analyzeBtn">开始复盘</button>
+              <button class="ghost" id="exportReport">导出报告</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>复盘总览</h2>
+            <span class="status" id="statusText">等待录音</span>
+          </div>
+          <div class="score-wrap">
+            <div class="score-ring">
+              <svg viewBox="0 0 120 120">
+                <circle cx="60" cy="60" r="52" class="ring-bg" />
+                <circle cx="60" cy="60" r="52" class="ring-progress" id="ringProgress" />
+              </svg>
+              <div class="score-value" id="scoreValue">--</div>
+            </div>
+            <div class="score-detail">
+              <div class="score-item">
+                <span>需求挖掘</span>
+                <strong id="needScore">--</strong>
+              </div>
+              <div class="score-item">
+                <span>风格匹配</span>
+                <strong id="styleScore">--</strong>
+              </div>
+              <div class="score-item">
+                <span>异议处理</span>
+                <strong id="objectionScore">--</strong>
+              </div>
+              <div class="score-item">
+                <span>成交推进</span>
+                <strong id="closeScore">--</strong>
+              </div>
+            </div>
+          </div>
+          <div class="stage-flow">
+            <div class="stage active">1. 需求引导</div>
+            <div class="stage active">2. 风格沟通</div>
+            <div class="stage">3. 套餐呈现</div>
+            <div class="stage">4. 预算异议</div>
+            <div class="stage">5. 档期推进</div>
+            <div class="stage">6. 定金确认</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>关键改进点</h2>
+            <span class="chip">摄影写真行业</span>
+          </div>
+          <div class="insight-list" id="insightList">
+            <div class="insight">
+              <div class="insight-title">未深入确认客户风格偏好</div>
+              <p>客户提到“想要清透感”，但未追问参考风格/肤色/场景，导致套餐推荐偏模糊。</p>
+              <div class="insight-meta">
+                <div class="insight-label">底层逻辑分析</div>
+                <p>未建立“风格锚点”，客户无法把想象映射到具体方案，安全感与确定性不足。</p>
+              </div>
+              <div class="insight-meta">
+                <div class="insight-label">满分话术模板</div>
+                <div class="insight-script">“清透感可以走两种路线：森系偏自然、城市偏高级。您更像哪种？我再给您对应样片，保证风格不跑偏。”</div>
+              </div>
+              <span class="tag">风格沟通</span>
+            </div>
+            <div class="insight">
+              <div class="insight-title">预算异议后缺少下一步推进</div>
+              <p>客户提出“有点超预算”，未给出分级方案或付费节奏，建议补充分期/档位对比。</p>
+              <div class="insight-meta">
+                <div class="insight-label">底层逻辑分析</div>
+                <p>没有提供“可控的选择感”，客户只剩下“拒绝或接受”的二元决策。</p>
+              </div>
+              <div class="insight-meta">
+                <div class="insight-label">满分话术模板</div>
+                <div class="insight-script">“如果您更在意预算，我们有 6999/7999/9999 三档。我先按您最在意的风格挑两档，您看哪档更贴合。”</div>
+              </div>
+              <span class="tag">异议处理</span>
+            </div>
+            <div class="insight">
+              <div class="insight-title">未明确锁档与定金动作</div>
+              <p>收尾仅说“可以考虑”，未提出具体档期锁定或体验券，导致成交压力不足。</p>
+              <div class="insight-meta">
+                <div class="insight-label">底层逻辑分析</div>
+                <p>缺乏“行动门槛”，客户没有被引导完成一个小承诺，成交动能断裂。</p>
+              </div>
+              <div class="insight-meta">
+                <div class="insight-label">满分话术模板</div>
+                <div class="insight-script">“周末档期很紧，我先帮您保留一个黄金时间段，付 500 定金即可锁档，您看要不要先占位？”</div>
+              </div>
+              <span class="tag">成交推进</span>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+
+      <section class="panel-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>摄影写真行业复盘模板</h2>
+            <span class="chip">可配置</span>
+          </div>
+          <div class="template-preview" id="templatePreview"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>行动建议</h2>
+            <span class="chip">下一通可用</span>
+          </div>
+          <div class="action-list">
+            <div class="action">
+              <div class="action-title">补 3 个风格追问问题</div>
+              <p>准备风格卡片：森系、韩系、电影感，并询问肤色/场景/妆发期待。</p>
+            </div>
+            <div class="action">
+              <div class="action-title">提供价格梯度与支付方式</div>
+              <p>准备 6999/7999/9999 三档示例，强调差异点与分期选择。</p>
+            </div>
+            <div class="action">
+              <div class="action-title">明确档期锁定话术</div>
+              <p>“我们先帮您保留最热门周末档期，付 500 定金即可锁档。”</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel report-panel">
+        <div class="panel-header">
+          <h2>复盘报告</h2>
+          <span class="chip">LLM 输出</span>
+        </div>
+        <div class="report-content" id="reportContent">等待生成复盘报告</div>
+      </section>
+
+      <section class="panel-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>门店话术模板配置</h2>
+            <span class="chip">本地保存</span>
+          </div>
+          <div class="template-editor" id="templateEditor"></div>
+          <div class="template-actions">
+            <button class="ghost" id="addTemplate">新增模块</button>
+            <button class="cta" id="saveTemplate">保存模板</button>
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+
+    <footer class="footer">
+      <div>© 2026 光影复盘 · 摄影写真行业销售复盘机器人</div>
+      <div>数据加密 · 可私有化部署 · 支持门店话术模板</div>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+config/ai.config.json
+uploads/
+node_modules/
+.env
+.env.local
+.env.*.local

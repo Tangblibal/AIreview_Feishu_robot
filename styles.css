@@ -92,7 +92,19 @@ body {
 
 .nav-links {
   display: flex;
+  align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.auth-user {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: rgba(255, 255, 255, 0.55);
 }
 
 button {
@@ -126,6 +138,11 @@ button {
 
 .cta:hover {
   transform: translateY(-2px);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .layout {
@@ -239,6 +256,11 @@ button {
 .upload-area.drag {
   border-color: rgba(32, 57, 44, 0.5);
   background: rgba(236, 244, 238, 0.9);
+}
+
+.upload-area.disabled {
+  opacity: 0.5;
+  pointer-events: none;
 }
 
 .upload-area input {

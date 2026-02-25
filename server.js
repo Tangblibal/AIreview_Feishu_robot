@@ -9,6 +9,10 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = __dirname;
 const CONFIG_PATH = path.join(__dirname, 'config', 'ai.config.json');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const SESSION_COOKIE_NAME = 'lumo_session';
+
+const sessionStore = new Map();
+const oauthStateStore = new Map();
 
 const DEFAULT_CONFIG = {
   active_provider: 'deepseek',
@@ -406,6 +410,248 @@ function getActiveSttProvider(config) {
     return { name: 'deepgram', config: null };
   }
   return { name, config: provider };
+}
+
+function toCsvSet(value) {
+  if (!value) return new Set();
+  return new Set(
+    value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  );
+}
+
+function getRequestProto(req) {
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  if (typeof forwardedProto === 'string' && forwardedProto.trim()) {
+    return forwardedProto.split(',')[0].trim();
+  }
+  return req.socket?.encrypted ? 'https' : 'http';
+}
+
+function getRequestOrigin(req) {
+  const proto = getRequestProto(req);
+  return `${proto}://${req.headers.host}`;
+}
+
+function getFeishuAuthConfig(req) {
+  const enabled = readEnvBoolean('FEISHU_ENABLED') ?? false;
+  const requiredEnv = readEnvBoolean('AUTH_REQUIRED');
+  const required = requiredEnv === undefined ? enabled : requiredEnv;
+  const origin = getRequestOrigin(req);
+  const appId = readEnvString('FEISHU_APP_ID');
+  const appSecret = readEnvString('FEISHU_APP_SECRET');
+  const authorizeUrl = readEnvString('FEISHU_AUTHORIZE_URL') || 'https://open.feishu.cn/open-apis/authen/v1/index';
+  const tokenUrl =
+    readEnvString('FEISHU_TOKEN_URL') || 'https://open.feishu.cn/open-apis/authen/v1/oidc/access_token';
+  const userInfoUrl =
+    readEnvString('FEISHU_USERINFO_URL') || 'https://open.feishu.cn/open-apis/authen/v1/user_info';
+  const redirectUri = readEnvString('FEISHU_REDIRECT_URI') || `${origin}/auth/feishu/callback`;
+  const sessionTtlSec = readEnvNumber('SESSION_TTL_SECONDS') || 12 * 60 * 60;
+  const allowedOpenIds = toCsvSet(readEnvString('FEISHU_ALLOWED_OPEN_IDS', { allowEmpty: true }));
+  const allowedEmails = toCsvSet(readEnvString('FEISHU_ALLOWED_EMAILS', { allowEmpty: true }));
+  return {
+    enabled,
+    required,
+    appId,
+    appSecret,
+    authorizeUrl,
+    tokenUrl,
+    userInfoUrl,
+    redirectUri,
+    scope: readEnvString('FEISHU_SCOPE') || 'contact:user.base:readonly',
+    responseType: readEnvString('FEISHU_RESPONSE_TYPE') || 'code',
+    stateTtlSec: readEnvNumber('FEISHU_STATE_TTL_SECONDS') || 10 * 60,
+    sessionTtlSec,
+    allowedOpenIds,
+    allowedEmails,
+  };
+}
+
+function parseCookieHeader(headerValue = '') {
+  const cookies = {};
+  headerValue
+    .split(';')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((pair) => {
+      const equalIndex = pair.indexOf('=');
+      if (equalIndex === -1) return;
+      const key = pair.slice(0, equalIndex).trim();
+      const value = pair.slice(equalIndex + 1).trim();
+      try {
+        cookies[key] = decodeURIComponent(value);
+      } catch (error) {
+        cookies[key] = value;
+      }
+    });
+  return cookies;
+}
+
+function isSecureRequest(req) {
+  return getRequestProto(req) === 'https';
+}
+
+function appendSetCookie(res, cookieValue) {
+  const current = res.getHeader('Set-Cookie');
+  if (!current) {
+    res.setHeader('Set-Cookie', cookieValue);
+    return;
+  }
+  const next = Array.isArray(current) ? [...current, cookieValue] : [current, cookieValue];
+  res.setHeader('Set-Cookie', next);
+}
+
+function setCookie(res, name, value, options = {}) {
+  const attributes = [`${name}=${encodeURIComponent(value)}`];
+  attributes.push(`Path=${options.path || '/'}`);
+  if (options.httpOnly !== false) attributes.push('HttpOnly');
+  if (options.sameSite) attributes.push(`SameSite=${options.sameSite}`);
+  if (options.secure) attributes.push('Secure');
+  if (typeof options.maxAge === 'number') attributes.push(`Max-Age=${Math.max(0, Math.floor(options.maxAge))}`);
+  if (options.expires instanceof Date) attributes.push(`Expires=${options.expires.toUTCString()}`);
+  appendSetCookie(res, attributes.join('; '));
+}
+
+function readSessionRecord(req) {
+  const cookies = parseCookieHeader(req.headers.cookie || '');
+  const sid = cookies[SESSION_COOKIE_NAME];
+  if (!sid) return null;
+  const record = sessionStore.get(sid);
+  if (!record) return null;
+  if (record.expiresAt <= Date.now()) {
+    sessionStore.delete(sid);
+    return null;
+  }
+  return { sid, record };
+}
+
+function clearSession(req, res) {
+  const session = readSessionRecord(req);
+  if (session) {
+    sessionStore.delete(session.sid);
+  }
+  setCookie(res, SESSION_COOKIE_NAME, '', {
+    path: '/',
+    maxAge: 0,
+    expires: new Date(0),
+    sameSite: 'Lax',
+    secure: isSecureRequest(req),
+  });
+}
+
+function createSession(res, req, user, ttlSeconds) {
+  const sid = crypto.randomUUID();
+  const expiresAt = Date.now() + ttlSeconds * 1000;
+  sessionStore.set(sid, { user, expiresAt });
+  setCookie(res, SESSION_COOKIE_NAME, sid, {
+    path: '/',
+    maxAge: ttlSeconds,
+    sameSite: 'Lax',
+    secure: isSecureRequest(req),
+  });
+  return sid;
+}
+
+function normalizeReturnPath(rawPath) {
+  if (!rawPath || typeof rawPath !== 'string') return '/';
+  if (!rawPath.startsWith('/')) return '/';
+  if (rawPath.startsWith('//')) return '/';
+  return rawPath;
+}
+
+function cleanupExpiredAuthCache() {
+  const now = Date.now();
+  sessionStore.forEach((record, sid) => {
+    if (record.expiresAt <= now) {
+      sessionStore.delete(sid);
+    }
+  });
+  oauthStateStore.forEach((record, state) => {
+    if (record.expiresAt <= now) {
+      oauthStateStore.delete(state);
+    }
+  });
+}
+
+function buildLoginUrl(returnTo = '/') {
+  return `/auth/feishu/login?return_to=${encodeURIComponent(normalizeReturnPath(returnTo))}`;
+}
+
+async function exchangeFeishuToken(config, code) {
+  const payload = {
+    grant_type: 'authorization_code',
+    code,
+    app_id: config.appId,
+    app_secret: config.appSecret,
+    redirect_uri: config.redirectUri,
+  };
+  const response = await fetch(config.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Feishu token API error: ${response.status}`);
+  }
+  const data = await response.json().catch(() => ({}));
+  const tokenData = data?.data || data;
+  const accessToken = tokenData?.access_token;
+  if (!accessToken) {
+    throw new Error(`Feishu token response missing access_token (${tokenData?.code || 'unknown'})`);
+  }
+  return accessToken;
+}
+
+async function fetchFeishuUserProfile(config, accessToken) {
+  const response = await fetch(config.userInfoUrl, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Feishu user info API error: ${response.status}`);
+  }
+  const data = await response.json().catch(() => ({}));
+  const profile = data?.data || data || {};
+  return {
+    open_id: profile.open_id || profile.openId || '',
+    union_id: profile.union_id || profile.unionId || '',
+    name: profile.name || profile.en_name || profile.display_name || '飞书用户',
+    email: profile.email || profile.enterprise_email || '',
+    avatar_url: profile.avatar_url || profile.avatar_url_big || profile.avatar_url_240 || '',
+    raw: profile,
+  };
+}
+
+function isAuthorizedEmployee(config, profile) {
+  if (!config.allowedOpenIds.size && !config.allowedEmails.size) return true;
+  if (profile.open_id && config.allowedOpenIds.has(profile.open_id)) return true;
+  if (profile.email && config.allowedEmails.has(profile.email)) return true;
+  return false;
+}
+
+function getAuthContext(req, urlPathForLogin = '/') {
+  cleanupExpiredAuthCache();
+  const authConfig = getFeishuAuthConfig(req);
+  const session = readSessionRecord(req);
+  const user = session?.record?.user || null;
+  if (!authConfig.required) {
+    return { ok: true, authConfig, user, loginUrl: buildLoginUrl(urlPathForLogin) };
+  }
+  if (!user) {
+    return { ok: false, authConfig, user: null, loginUrl: buildLoginUrl(urlPathForLogin) };
+  }
+  return { ok: true, authConfig, user, loginUrl: buildLoginUrl(urlPathForLogin) };
+}
+
+function applySecurityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 }
 
 function buildPrompt(transcript, templates) {
@@ -1332,13 +1578,109 @@ function parseMultipartForm(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+  applySecurityHeaders(res);
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const requestPath = `${url.pathname}${url.search || ''}`;
 
   if (url.pathname === '/api/health') {
     return sendJson(res, 200, { ok: true });
   }
 
+  if (url.pathname === '/api/me') {
+    const authConfig = getFeishuAuthConfig(req);
+    const session = readSessionRecord(req);
+    return sendJson(res, 200, {
+      ok: true,
+      authenticated: Boolean(session?.record?.user),
+      user: session?.record?.user || null,
+      auth: {
+        enabled: authConfig.enabled,
+        required: authConfig.required,
+        login_url: buildLoginUrl('/'),
+      },
+    });
+  }
+
+  if (url.pathname === '/auth/feishu/login' && req.method === 'GET') {
+    const authConfig = getFeishuAuthConfig(req);
+    if (!authConfig.enabled) {
+      return sendJson(res, 503, { ok: false, message: 'Feishu auth disabled' });
+    }
+    if (!authConfig.appId || !authConfig.appSecret) {
+      return sendJson(res, 500, { ok: false, message: 'Missing FEISHU_APP_ID or FEISHU_APP_SECRET' });
+    }
+    const returnTo = normalizeReturnPath(url.searchParams.get('return_to') || '/');
+    const state = crypto.randomUUID();
+    oauthStateStore.set(state, {
+      expiresAt: Date.now() + authConfig.stateTtlSec * 1000,
+      returnTo,
+    });
+    const authorizeUrl = new URL(authConfig.authorizeUrl);
+    authorizeUrl.searchParams.set('app_id', authConfig.appId);
+    authorizeUrl.searchParams.set('redirect_uri', authConfig.redirectUri);
+    authorizeUrl.searchParams.set('state', state);
+    authorizeUrl.searchParams.set('response_type', authConfig.responseType);
+    if (authConfig.scope) {
+      authorizeUrl.searchParams.set('scope', authConfig.scope);
+    }
+    res.writeHead(302, { Location: authorizeUrl.toString() });
+    return res.end();
+  }
+
+  if (url.pathname === '/auth/feishu/callback' && req.method === 'GET') {
+    const authConfig = getFeishuAuthConfig(req);
+    if (!authConfig.enabled) {
+      return sendJson(res, 503, { ok: false, message: 'Feishu auth disabled' });
+    }
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (!code || !state) {
+      return sendJson(res, 400, { ok: false, message: 'Missing code or state' });
+    }
+    const stateRecord = oauthStateStore.get(state);
+    if (!stateRecord || stateRecord.expiresAt <= Date.now()) {
+      oauthStateStore.delete(state);
+      return sendJson(res, 400, { ok: false, message: 'Invalid or expired state' });
+    }
+    oauthStateStore.delete(state);
+    try {
+      const accessToken = await exchangeFeishuToken(authConfig, code);
+      const profile = await fetchFeishuUserProfile(authConfig, accessToken);
+      if (!isAuthorizedEmployee(authConfig, profile)) {
+        return sendJson(res, 403, { ok: false, message: 'Account is not in allowed employee list' });
+      }
+      const user = {
+        name: profile.name,
+        open_id: profile.open_id,
+        email: profile.email,
+        avatar_url: profile.avatar_url,
+        login_at: new Date().toISOString(),
+      };
+      createSession(res, req, user, authConfig.sessionTtlSec);
+      console.log(
+        `[auth] feishu login success open_id=${user.open_id || 'unknown'} email=${user.email || 'unknown'}`,
+      );
+      res.writeHead(302, { Location: stateRecord.returnTo || '/' });
+      return res.end();
+    } catch (error) {
+      return sendJson(res, 500, { ok: false, message: error.message });
+    }
+  }
+
+  if (url.pathname === '/auth/logout' && req.method === 'POST') {
+    clearSession(req, res);
+    return sendJson(res, 200, { ok: true });
+  }
+
   if (url.pathname === '/api/review' && req.method === 'POST') {
+    const auth = getAuthContext(req, requestPath);
+    if (!auth.ok) {
+      return sendJson(res, 401, {
+        ok: false,
+        message: '请先通过飞书登录后再使用复盘功能',
+        login_url: auth.loginUrl,
+      });
+    }
     try {
       const { fields, files } = await parseMultipartForm(req);
       let audioFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
@@ -1422,6 +1764,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/analyze' && req.method === 'POST') {
+    const auth = getAuthContext(req, requestPath);
+    if (!auth.ok) {
+      return sendJson(res, 401, {
+        ok: false,
+        message: '请先通过飞书登录后再使用复盘功能',
+        login_url: auth.loginUrl,
+      });
+    }
     try {
       const raw = await collectBody(req);
       const body = JSON.parse(raw || '{}');
@@ -1460,7 +1810,11 @@ const server = http.createServer(async (req, res) => {
       return res.end('Not found');
     }
     const ext = path.extname(fullPath);
-    res.writeHead(200, { 'Content-Type': contentTypes[ext] || 'text/plain' });
+    const headers = { 'Content-Type': contentTypes[ext] || 'text/plain' };
+    if (ext === '.html') {
+      headers['Cache-Control'] = 'no-cache';
+    }
+    res.writeHead(200, headers);
     res.end(content);
   });
 });

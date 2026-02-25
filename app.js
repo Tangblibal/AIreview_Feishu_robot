@@ -18,6 +18,9 @@ const templatePreview = document.getElementById('templatePreview');
 const addTemplate = document.getElementById('addTemplate');
 const saveTemplate = document.getElementById('saveTemplate');
 const reportContent = document.getElementById('reportContent');
+const authUser = document.getElementById('authUser');
+const loginBtn = document.getElementById('loginBtn');
+const logoutBtn = document.getElementById('logoutBtn');
 const CIRCUMFERENCE = 327;
 const STORAGE_KEYS = {
   template: 'lumo_templates',
@@ -25,6 +28,11 @@ const STORAGE_KEYS = {
 
 let selectedFile = null;
 let latestReportMarkdown = '';
+let authState = {
+  authenticated: false,
+  user: null,
+  auth: { enabled: false, required: false, login_url: '/auth/feishu/login?return_to=%2F' },
+};
 
 const defaultTemplates = [
   {
@@ -263,6 +271,71 @@ function renderReportMarkdown(markdown) {
   reportContent.innerHTML = html;
 }
 
+function setAnalyzeAvailability(disabled) {
+  if (analyzeBtn) analyzeBtn.disabled = disabled;
+  if (audioUpload) audioUpload.disabled = disabled;
+  if (uploadArea) uploadArea.classList.toggle('disabled', disabled);
+}
+
+function getCurrentPath() {
+  return `${window.location.pathname}${window.location.search || ''}`;
+}
+
+function getLoginUrl() {
+  const raw = authState.auth?.login_url;
+  if (raw) return raw;
+  return `/auth/feishu/login?return_to=${encodeURIComponent(getCurrentPath())}`;
+}
+
+function renderAuthState() {
+  const authenticated = Boolean(authState.authenticated);
+  const required = Boolean(authState.auth?.required);
+  const enabled = Boolean(authState.auth?.enabled);
+
+  if (authUser) {
+    if (authenticated) {
+      const name = authState.user?.name || authState.user?.email || '已登录';
+      authUser.textContent = `员工：${name}`;
+    } else if (!enabled) {
+      authUser.textContent = '登录未启用';
+    } else if (required) {
+      authUser.textContent = '请先飞书登录';
+    } else {
+      authUser.textContent = '未登录（可匿名使用）';
+    }
+  }
+
+  if (loginBtn) {
+    loginBtn.hidden = authenticated || !enabled;
+  }
+  if (logoutBtn) {
+    logoutBtn.hidden = !authenticated;
+  }
+
+  setAnalyzeAvailability(required && !authenticated);
+}
+
+async function refreshAuthState() {
+  try {
+    const response = await fetch('/api/me', { credentials: 'include' });
+    const data = await response.json();
+    if (data?.ok) {
+      authState = {
+        authenticated: Boolean(data.authenticated),
+        user: data.user || null,
+        auth: data.auth || { enabled: false, required: false },
+      };
+    }
+  } catch (error) {
+    authState = {
+      authenticated: false,
+      user: null,
+      auth: { enabled: false, required: false, login_url: '/auth/feishu/login?return_to=%2F' },
+    };
+  }
+  renderAuthState();
+}
+
 function exportReportPdf() {
   if (!latestReportMarkdown) {
     statusText.textContent = '暂无可导出的复盘报告';
@@ -410,6 +483,11 @@ function collectTemplates() {
 }
 
 async function runAnalysisWithApi() {
+  if (authState.auth?.required && !authState.authenticated) {
+    statusText.textContent = '请先飞书登录';
+    window.location.href = getLoginUrl();
+    return false;
+  }
   if (!selectedFile) {
     statusText.textContent = '请先上传录音文件';
     return null;
@@ -424,7 +502,18 @@ async function runAnalysisWithApi() {
     const response = await fetch('/api/review', {
       method: 'POST',
       body: payload,
+      credentials: 'include',
     });
+    if (response.status === 401) {
+      const unauthorized = await response.json().catch(() => ({}));
+      statusText.textContent = unauthorized.message || '请先飞书登录';
+      if (unauthorized.login_url) {
+        window.location.href = unauthorized.login_url;
+      } else {
+        window.location.href = getLoginUrl();
+      }
+      return false;
+    }
     const data = await response.json();
     if (!data.ok) {
       statusText.textContent = data.message || '分析失败';
@@ -529,5 +618,19 @@ saveTemplate?.addEventListener('click', () => {
   renderTemplatePreview(templates);
 });
 
+loginBtn?.addEventListener('click', () => {
+  window.location.href = getLoginUrl();
+});
+
+logoutBtn?.addEventListener('click', async () => {
+  try {
+    await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
+  } finally {
+    await refreshAuthState();
+    statusText.textContent = '已退出登录';
+  }
+});
+
 initTemplates();
 renderReportMarkdown('');
+refreshAuthState();

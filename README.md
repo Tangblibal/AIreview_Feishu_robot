@@ -71,6 +71,49 @@ npm start
 - `GET /api/health` 返回 `{"ok":true}`
 - 上传一段音频，确认 `/api/review` 可返回复盘结果
 
+> 说明：Railway 适合快速验证，不保证中国大陆长期稳定可达。面向大陆员工长期使用，建议迁移到中国大陆云厂商并完成备案。
+
+## 飞书开放平台接入（员工登录）
+当前版本已内置飞书 OAuth 登录入口，支持保护 `/api/analyze` 与 `/api/review`。
+
+1. 在飞书开放平台创建企业自建应用（面向企业内部员工）。
+2. 在应用中开启网页授权能力，回调地址配置为：
+   - `https://你的域名/auth/feishu/callback`
+3. 在后端环境变量配置：
+   - `FEISHU_ENABLED=true`
+   - `AUTH_REQUIRED=true`
+   - `FEISHU_APP_ID=...`
+   - `FEISHU_APP_SECRET=...`
+   - `FEISHU_REDIRECT_URI=https://你的域名/auth/feishu/callback`
+4. 可选员工白名单（建议）：
+   - `FEISHU_ALLOWED_OPEN_IDS=open_id_1,open_id_2`
+   - 或 `FEISHU_ALLOWED_EMAILS=a@company.com,b@company.com`
+   - 如果按邮箱白名单，需在飞书开放平台给应用申请邮箱相关 scope，并将 `FEISHU_SCOPE` 扩展到包含邮箱读取权限。
+5. 发布应用版本并在企业内可见范围中授权给员工。
+
+接口说明：
+- `GET /api/me`：返回登录态
+- `GET /auth/feishu/login`：发起飞书登录
+- `GET /auth/feishu/callback`：登录回调
+- `POST /auth/logout`：退出登录
+
+## 中国大陆长期稳定 + 合规部署建议
+若目标是长期服务中国大陆员工，请按以下基线落地：
+
+1. 计算与网络：
+   - 部署到中国大陆地域（阿里云/腾讯云/华为云等）
+   - 使用大陆可访问域名与国内 CDN/WAF
+2. 备案与资质：
+   - 完成 ICP 备案（网站/服务）
+   - 按需完成公安联网备案
+3. 数据与安全：
+   - 生产密钥只放环境变量/密钥管理服务
+   - 音频与复盘结果存储到对象存储 + 数据库，开启访问控制和日志审计
+   - 传输强制 HTTPS，服务端保留最小必要日志
+4. 稳定性：
+   - 服务做主备与监控告警（CPU/内存/5xx/延迟）
+   - 为 ASR/LLM 接口配置超时、重试、降级策略
+
 ## 功能一览
 - 高级感 UI 设计 + 行业信息
 - 上传录音（演示）
@@ -78,6 +121,7 @@ npm start
 - 门店话术模板配置（本地保存）
 - 导出 PDF（浏览器打印保存）
 - 多模型适配（OpenAI / Claude / Deepseek / Doubao / Qwen）
+- 飞书员工登录（可保护复盘接口）
 
 ## 注意
 - 浏览器内不会直接调用第三方 API，以避免泄露 Key。

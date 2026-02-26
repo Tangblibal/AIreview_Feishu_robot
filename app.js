@@ -22,12 +22,15 @@ const authUser = document.getElementById('authUser');
 const loginBtn = document.getElementById('loginBtn');
 const logoutBtn = document.getElementById('logoutBtn');
 const CIRCUMFERENCE = 327;
+const ANALYZE_TIMEOUT_MS = 15 * 60 * 1000;
+const REVIEW_POLL_FALLBACK_MS = 3000;
 const STORAGE_KEYS = {
   template: 'lumo_templates',
 };
 
 let selectedFile = null;
 let latestReportMarkdown = '';
+let isAnalyzing = false;
 let authState = {
   authenticated: false,
   user: null,
@@ -271,7 +274,10 @@ function renderReportMarkdown(markdown) {
   reportContent.innerHTML = html;
 }
 
-function setAnalyzeAvailability(disabled) {
+function updateAnalyzeAvailability() {
+  const requiresAuth = Boolean(authState.auth?.required);
+  const disabledByAuth = requiresAuth && !authState.authenticated;
+  const disabled = disabledByAuth || isAnalyzing;
   if (analyzeBtn) analyzeBtn.disabled = disabled;
   if (audioUpload) audioUpload.disabled = disabled;
   if (uploadArea) uploadArea.classList.toggle('disabled', disabled);
@@ -312,7 +318,7 @@ function renderAuthState() {
     logoutBtn.hidden = !authenticated;
   }
 
-  setAnalyzeAvailability(required && !authenticated);
+  updateAnalyzeAvailability();
 }
 
 async function refreshAuthState() {
@@ -334,6 +340,16 @@ async function refreshAuthState() {
     };
   }
   renderAuthState();
+}
+
+async function parseJsonSafe(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    return { ok: false, message: text.slice(0, 200) };
+  }
 }
 
 function exportReportPdf() {
@@ -396,6 +412,17 @@ function renderTranscript(utterances = []) {
 function setSelectedFile(file) {
   selectedFile = file;
   if (!file) return;
+  const maxAudioMb = 50;
+  if (file.size > maxAudioMb * 1024 * 1024) {
+    selectedFile = null;
+    statusText.textContent = `文件过大，最大支持 ${maxAudioMb}MB`;
+    const uploadText = uploadArea?.querySelector('.upload-text');
+    if (uploadText) {
+      uploadText.textContent = '拖拽或点击上传销售录音';
+    }
+    if (audioUpload) audioUpload.value = '';
+    return;
+  }
   statusText.textContent = `已上传：${file.name}`;
   const uploadText = uploadArea?.querySelector('.upload-text');
   if (uploadText) {
@@ -482,7 +509,103 @@ function collectTemplates() {
   return sections.length ? sections : defaultTemplates;
 }
 
+function formatErrorMessage(message, requestId, fallback = '分析失败') {
+  const text = message || fallback;
+  return requestId ? `${text} · 请求ID ${requestId}` : text;
+}
+
+function applyReviewResult(data) {
+  setRingScore(data.report?.total || mockReport.total);
+  fillScores({
+    need: data.report?.need || mockReport.need,
+    style: data.report?.style || mockReport.style,
+    objection: data.report?.objection || mockReport.objection,
+    close: data.report?.close || mockReport.close,
+    status: data.report?.status || '完成 · AI 已生成复盘',
+  });
+  if (data.message) {
+    statusText.textContent = data.message;
+  }
+  renderInsights(data.report?.insights || mockReport.insights);
+  latestReportMarkdown = data.report?.report_markdown || '';
+  renderReportMarkdown(latestReportMarkdown || '暂无复盘报告。');
+  if (Array.isArray(data.utterances) && data.utterances.length) {
+    renderTranscript(data.utterances);
+  } else if (data.transcript) {
+    renderTranscript([{ role: 'sales', text: data.transcript }]);
+  }
+}
+
+function waitFor(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function pollReviewJobUntilDone(jobId, pollUrl, deadlineAt) {
+  while (Date.now() < deadlineAt) {
+    const response = await fetch(pollUrl, {
+      method: 'GET',
+      credentials: 'include',
+    });
+
+    if (response.status === 401) {
+      const unauthorized = await parseJsonSafe(response);
+      return { ok: false, unauthorized: true, ...unauthorized };
+    }
+
+    const data = await parseJsonSafe(response);
+
+    if (response.status === 429) {
+      const waitSeconds = Number(data.retry_after_seconds || response.headers.get('Retry-After') || 3);
+      statusText.textContent = `系统繁忙，${waitSeconds} 秒后重试（任务 ${jobId.slice(0, 8)}）`;
+      await waitFor(Math.max(1000, waitSeconds * 1000));
+      continue;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: formatErrorMessage(data.message || `服务异常（${response.status}）`, data.request_id, '任务查询失败'),
+      };
+    }
+
+    const status = `${data.status || ''}`.toLowerCase();
+    if (status === 'queued') {
+      const queuePosition = Number(data.queue_position || 0);
+      statusText.textContent = queuePosition > 0 ? `任务排队中（前方 ${queuePosition - 1} 个）` : '任务排队中';
+      await waitFor(Math.max(1000, Number(data.poll_after_ms) || REVIEW_POLL_FALLBACK_MS));
+      continue;
+    }
+    if (status === 'processing') {
+      statusText.textContent = '任务处理中 · 正在转写并生成复盘';
+      await waitFor(Math.max(1000, Number(data.poll_after_ms) || REVIEW_POLL_FALLBACK_MS));
+      continue;
+    }
+    if (status === 'succeeded') {
+      return { ok: true, ...data };
+    }
+    if (status === 'failed' || data.ok === false) {
+      return {
+        ok: false,
+        message: formatErrorMessage(data.message, data.request_id, '分析失败'),
+      };
+    }
+
+    await waitFor(REVIEW_POLL_FALLBACK_MS);
+  }
+
+  return {
+    ok: false,
+    message: '分析超时，请稍后重试（建议缩短录音或分段上传）',
+  };
+}
+
 async function runAnalysisWithApi() {
+  if (isAnalyzing) {
+    statusText.textContent = '分析任务正在进行中，请稍候...';
+    return false;
+  }
   if (authState.auth?.required && !authState.authenticated) {
     statusText.textContent = '请先飞书登录';
     window.location.href = getLoginUrl();
@@ -492,7 +615,28 @@ async function runAnalysisWithApi() {
     statusText.textContent = '请先上传录音文件';
     return null;
   }
-  statusText.textContent = '分析中 · 正在调用 AI 引擎';
+  statusText.textContent = '分析中 · 正在调用 AI 引擎（通常 1-3 分钟）';
+  isAnalyzing = true;
+  updateAnalyzeAvailability();
+
+  const progressMessages = [
+    '分析中 · 正在上传并转写音频',
+    '分析中 · 正在提炼关键销售节点',
+    '分析中 · 正在生成复盘报告',
+    '分析中 · 正在做结果校验，请稍候',
+  ];
+  let progressStep = 0;
+  const progressTimer = setInterval(() => {
+    if (progressStep < progressMessages.length && statusText.textContent.startsWith('分析中')) {
+      statusText.textContent = progressMessages[progressStep];
+      progressStep += 1;
+    }
+  }, 15000);
+  const controller = new AbortController();
+  const timeoutTimer = setTimeout(() => {
+    controller.abort();
+  }, ANALYZE_TIMEOUT_MS);
+  const deadlineAt = Date.now() + ANALYZE_TIMEOUT_MS;
 
   try {
     const payload = new FormData();
@@ -503,9 +647,10 @@ async function runAnalysisWithApi() {
       method: 'POST',
       body: payload,
       credentials: 'include',
+      signal: controller.signal,
     });
     if (response.status === 401) {
-      const unauthorized = await response.json().catch(() => ({}));
+      const unauthorized = await parseJsonSafe(response);
       statusText.textContent = unauthorized.message || '请先飞书登录';
       if (unauthorized.login_url) {
         window.location.href = unauthorized.login_url;
@@ -514,34 +659,53 @@ async function runAnalysisWithApi() {
       }
       return false;
     }
-    const data = await response.json();
-    if (!data.ok) {
-      statusText.textContent = data.message || '分析失败';
+    const data = await parseJsonSafe(response);
+    if (!response.ok) {
+      statusText.textContent = formatErrorMessage(data.message || `服务异常（${response.status}）`, data.request_id, '服务异常');
       return false;
     }
-    setRingScore(data.report.total || mockReport.total);
-    fillScores({
-      need: data.report.need || mockReport.need,
-      style: data.report.style || mockReport.style,
-      objection: data.report.objection || mockReport.objection,
-      close: data.report.close || mockReport.close,
-      status: data.report.status || '完成 · AI 已生成复盘',
-    });
-    if (data.message) {
-      statusText.textContent = data.message;
+
+    if ((response.status === 202 || data.accepted || data.job_id) && data.job_id) {
+      const pollUrl = data.poll_url || `/api/review/jobs/${data.job_id}`;
+      statusText.textContent = `任务已提交，正在排队（任务 ${data.job_id.slice(0, 8)}）`;
+      const finalResult = await pollReviewJobUntilDone(data.job_id, pollUrl, deadlineAt);
+
+      if (finalResult.unauthorized) {
+        statusText.textContent = finalResult.message || '请先飞书登录';
+        if (finalResult.login_url) {
+          window.location.href = finalResult.login_url;
+        } else {
+          window.location.href = getLoginUrl();
+        }
+        return false;
+      }
+      if (!finalResult.ok) {
+        statusText.textContent = finalResult.message || '分析失败';
+        return false;
+      }
+
+      applyReviewResult(finalResult);
+      return true;
     }
-    renderInsights(data.report.insights || mockReport.insights);
-    latestReportMarkdown = data.report.report_markdown || '';
-    renderReportMarkdown(latestReportMarkdown || '暂无复盘报告。');
-    if (data.utterances && data.utterances.length) {
-      renderTranscript(data.utterances);
-    } else if (data.transcript) {
-      renderTranscript([{ role: 'sales', text: data.transcript }]);
+
+    if (!data.ok || !data.report) {
+      statusText.textContent = formatErrorMessage(data.message, data.request_id, '分析失败');
+      return false;
     }
+    applyReviewResult(data);
     return true;
   } catch (error) {
-    statusText.textContent = error?.message || '服务不可用';
+    if (error?.name === 'AbortError') {
+      statusText.textContent = '分析超时，请稍后重试（建议缩短录音或分段上传）';
+    } else {
+      statusText.textContent = error?.message || '服务不可用';
+    }
     return false;
+  } finally {
+    clearInterval(progressTimer);
+    clearTimeout(timeoutTimer);
+    isAnalyzing = false;
+    updateAnalyzeAvailability();
   }
 }
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=QJGroup AI Review App
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qjgroup-ai-review
+EnvironmentFile=/etc/lumo-review.env
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

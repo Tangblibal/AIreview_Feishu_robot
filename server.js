@@ -13,6 +13,31 @@ const SESSION_COOKIE_NAME = 'lumo_session';
 
 const sessionStore = new Map();
 const oauthStateStore = new Map();
+const reviewJobStore = new Map();
+const reviewJobQueue = [];
+const rateLimitStore = new Map();
+let reviewWorkersInFlight = 0;
+
+function envInteger(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || `${raw}`.trim() === '') return fallback;
+  const parsed = Number.parseInt(`${raw}`, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+const REVIEW_JOB_DEFAULT_MODE = `${process.env.REVIEW_JOB_MODE || 'async'}`.toLowerCase() === 'sync' ? 'sync' : 'async';
+const REVIEW_JOB_CONCURRENCY = envInteger('REVIEW_JOB_CONCURRENCY', 1, { min: 1, max: 8 });
+const REVIEW_JOB_MAX_PENDING = envInteger('REVIEW_JOB_MAX_PENDING', 20, { min: 1, max: 500 });
+const REVIEW_JOB_RESULT_TTL_MS = envInteger('REVIEW_JOB_RESULT_TTL_MS', 60 * 60 * 1000, {
+  min: 60 * 1000,
+  max: 24 * 60 * 60 * 1000,
+});
+const REVIEW_JOB_POLL_AFTER_MS = envInteger('REVIEW_JOB_POLL_AFTER_MS', 2500, { min: 1000, max: 15000 });
+const RATE_LIMIT_WINDOW_MS = envInteger('RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000, max: 10 * 60 * 1000 });
+const RATE_LIMIT_REVIEW_CREATE = envInteger('RATE_LIMIT_REVIEW_CREATE', 6, { min: 1, max: 500 });
+const RATE_LIMIT_REVIEW_STATUS = envInteger('RATE_LIMIT_REVIEW_STATUS', 180, { min: 1, max: 5000 });
+const RATE_LIMIT_ANALYZE = envInteger('RATE_LIMIT_ANALYZE', 30, { min: 1, max: 1000 });
 
 const DEFAULT_CONFIG = {
   active_provider: 'deepseek',
@@ -132,10 +157,216 @@ const contentTypes = {
   '.flac': 'audio/flac',
   '.ogg': 'audio/ogg',
 };
+const ALLOWED_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg']);
+const ALLOWED_AUDIO_MIME_PREFIXES = ['audio/', 'application/mp4'];
+const MAX_AUDIO_FILE_SIZE_MB = Number(process.env.MAX_AUDIO_FILE_SIZE_MB || 50);
+const MAX_AUDIO_FILE_SIZE_BYTES = Number.isFinite(MAX_AUDIO_FILE_SIZE_MB)
+  ? Math.max(1, MAX_AUDIO_FILE_SIZE_MB) * 1024 * 1024
+  : 50 * 1024 * 1024;
 
 function sendJson(res, status, payload) {
+  const output =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { ...payload, request_id: payload.request_id || res.getHeader('X-Request-Id') || undefined }
+      : payload;
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(payload));
+  res.end(JSON.stringify(output));
+}
+
+function createRequestId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function createAppError(code, message, status = 500, extra = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  error.extra = extra;
+  return error;
+}
+
+function buildErrorPayload(req, error, fallbackMessage) {
+  return {
+    ok: false,
+    error_code: error?.code || 'INTERNAL_ERROR',
+    message: error?.message || fallbackMessage,
+    request_id: req.requestId,
+    ...(error?.extra && typeof error.extra === 'object' ? error.extra : {}),
+  };
+}
+
+function resolveErrorStatus(error, fallbackStatus = 500) {
+  if (error?.status && Number.isInteger(error.status)) return error.status;
+  if (error?.httpCode && Number.isInteger(error.httpCode)) return error.httpCode;
+  if (error?.name === 'AbortError') return 504;
+  return fallbackStatus;
+}
+
+function getClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function consumeRateLimitToken(req, key, maxRequests, windowMs) {
+  const now = Date.now();
+  const bucketKey = `${key}:${getClientIp(req)}`;
+  const existing = rateLimitStore.get(bucketKey);
+  if (!existing || existing.resetAt <= now) {
+    const nextBucket = { count: 1, resetAt: now + windowMs };
+    rateLimitStore.set(bucketKey, nextBucket);
+    return {
+      ok: true,
+      remaining: Math.max(0, maxRequests - 1),
+      retryAfterSeconds: Math.ceil(windowMs / 1000),
+    };
+  }
+  existing.count += 1;
+  if (existing.count > maxRequests) {
+    return {
+      ok: false,
+      remaining: 0,
+      retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+    };
+  }
+  return {
+    ok: true,
+    remaining: Math.max(0, maxRequests - existing.count),
+    retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+  };
+}
+
+function enforceRateLimit(req, res, key, maxRequests, windowMs = RATE_LIMIT_WINDOW_MS) {
+  const result = consumeRateLimitToken(req, key, maxRequests, windowMs);
+  if (result.ok) return true;
+  res.setHeader('Retry-After', `${result.retryAfterSeconds}`);
+  sendJson(res, 429, {
+    ok: false,
+    error_code: 'RATE_LIMITED',
+    message: '请求过于频繁，请稍后重试。',
+    retry_after_seconds: result.retryAfterSeconds,
+  });
+  return false;
+}
+
+function cleanupRateLimitStore() {
+  const now = Date.now();
+  rateLimitStore.forEach((bucket, key) => {
+    if (!bucket || bucket.resetAt <= now) {
+      rateLimitStore.delete(key);
+    }
+  });
+}
+
+function buildJobOwnerKey(user, req) {
+  if (user?.open_id) return `open_id:${user.open_id}`;
+  if (user?.email) return `email:${user.email}`;
+  return `ip:${getClientIp(req)}`;
+}
+
+function normalizeJobError(error, fallbackMessage = 'Review failed') {
+  return {
+    error_code: error?.code || 'INTERNAL_ERROR',
+    message: error?.message || fallbackMessage,
+    status: resolveErrorStatus(error, 500),
+    ...(error?.extra && typeof error.extra === 'object' ? error.extra : {}),
+  };
+}
+
+function tryRemoveFile(filePath) {
+  if (!filePath) return;
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (error) {
+    console.warn(`[upload] Failed to remove file ${filePath}: ${error.message}`);
+  }
+}
+
+function extractAudioFileFromMultipart(files = {}) {
+  let audioFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
+  if (audioFile) return audioFile;
+  const firstKey = Object.keys(files)[0];
+  const firstFile = firstKey ? files[firstKey] : null;
+  return Array.isArray(firstFile) ? firstFile[0] : firstFile;
+}
+
+function parseTemplatesFromFields(fields = {}) {
+  if (!fields.templates) return [];
+  try {
+    const rawTemplates = Array.isArray(fields.templates) ? fields.templates[0] : fields.templates;
+    const parsed = JSON.parse(rawTemplates);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function resolveReviewMode(url) {
+  const mode = `${url.searchParams.get('mode') || ''}`.trim().toLowerCase();
+  if (mode === 'sync' || url.searchParams.get('sync') === '1') return 'sync';
+  if (mode === 'async') return 'async';
+  return REVIEW_JOB_DEFAULT_MODE;
+}
+
+function pruneReviewJobs() {
+  const now = Date.now();
+  reviewJobStore.forEach((job, jobId) => {
+    if (!job) {
+      reviewJobStore.delete(jobId);
+      return;
+    }
+    const isDone = job.status === 'succeeded' || job.status === 'failed';
+    if (!isDone) return;
+    const completedAt = job.finishedAt || job.updatedAt || job.createdAt;
+    if (completedAt && now - completedAt > REVIEW_JOB_RESULT_TTL_MS) {
+      reviewJobStore.delete(jobId);
+    }
+  });
+}
+
+function logReviewJobEvent(level, event, job, extra = {}) {
+  console.log(
+    JSON.stringify({
+      at: nowIso(),
+      level,
+      event,
+      job_id: job.id,
+      request_id: job.requestId,
+      status: job.status,
+      ...extra,
+    }),
+  );
+}
+
+function isSttDebugEnabled() {
+  return readEnvBoolean('STT_DEBUG_ENABLED') ?? false;
+}
+
+function buildSttDebugPayload(sttResult, fileInfo) {
+  const base = {
+    file: {
+      filename: fileInfo.filename,
+      contentType: fileInfo.contentType,
+      size: fileInfo.data?.length || 0,
+      publicUrl: fileInfo.publicUrl,
+      tosObjectKey: fileInfo.tosObjectKey,
+    },
+  };
+  if (isSttDebugEnabled()) {
+    return { ...sttResult.debug, ...base };
+  }
+  if (sttResult?.debug?.requestId) {
+    return { requestId: sttResult.debug.requestId, ...base };
+  }
+  return base;
 }
 
 function safeJoin(base, target) {
@@ -152,6 +383,33 @@ function ensureUploadsDir() {
 
 function sanitizeFilename(name = 'audio') {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function validateUploadedAudioFile(audioFile) {
+  const fileSize = Number(audioFile?.size || 0);
+  if (!fileSize || fileSize <= 0) {
+    throw createAppError('INVALID_AUDIO_FILE', '音频文件为空或不可读。', 400);
+  }
+  if (fileSize > MAX_AUDIO_FILE_SIZE_BYTES) {
+    throw createAppError(
+      'AUDIO_FILE_TOO_LARGE',
+      `音频文件过大，最大支持 ${Math.floor(MAX_AUDIO_FILE_SIZE_BYTES / (1024 * 1024))}MB。`,
+      413,
+      { max_size_mb: Math.floor(MAX_AUDIO_FILE_SIZE_BYTES / (1024 * 1024)) },
+    );
+  }
+  const fileName = `${audioFile?.originalFilename || ''}`.toLowerCase();
+  const ext = path.extname(fileName);
+  const mimetype = `${audioFile?.mimetype || ''}`.toLowerCase();
+  const extAllowed = ext ? ALLOWED_AUDIO_EXTENSIONS.has(ext) : false;
+  const mimeAllowed = ALLOWED_AUDIO_MIME_PREFIXES.some((prefix) => mimetype.startsWith(prefix));
+  const octetStreamWithoutExt = mimetype === 'application/octet-stream' && !extAllowed;
+  if ((!extAllowed && !mimeAllowed) || octetStreamWithoutExt) {
+    throw createAppError('UNSUPPORTED_AUDIO_TYPE', '不支持的音频格式，请上传 mp3/wav/m4a/aac/flac/ogg。', 415, {
+      filename: audioFile?.originalFilename || '',
+      mimetype: audioFile?.mimetype || '',
+    });
+  }
 }
 
 function saveUploadedFile(file) {
@@ -487,6 +745,37 @@ function parseCookieHeader(headerValue = '') {
       }
     });
   return cookies;
+}
+
+function logRequestStart(req) {
+  console.log(
+    JSON.stringify({
+      at: nowIso(),
+      level: 'info',
+      event: 'request_start',
+      request_id: req.requestId,
+      method: req.method,
+      path: req.url,
+      ip: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '',
+    }),
+  );
+}
+
+function logRequestFinish(req, statusCode, extra = {}) {
+  const elapsedMs = Date.now() - (req.startedAt || Date.now());
+  console.log(
+    JSON.stringify({
+      at: nowIso(),
+      level: statusCode >= 500 ? 'error' : 'info',
+      event: 'request_finish',
+      request_id: req.requestId,
+      method: req.method,
+      path: req.url,
+      status: statusCode,
+      elapsed_ms: elapsedMs,
+      ...extra,
+    }),
+  );
 }
 
 function isSecureRequest(req) {
@@ -989,8 +1278,19 @@ function stripCodeFences(text) {
     .trim();
 }
 
+function stripJsonComments(text) {
+  return text
+    .replace(/^\s*\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .trim();
+}
+
+function removeTrailingCommas(text) {
+  return text.replace(/,\s*([}\]])/g, '$1');
+}
+
 function extractFirstJson(text) {
-  const cleaned = stripCodeFences(text);
+  const cleaned = removeTrailingCommas(stripJsonComments(stripCodeFences(text)));
   const startIndex = cleaned.search(/[\{\[]/);
   if (startIndex === -1) {
     throw new Error('No JSON object found in model response.');
@@ -1025,24 +1325,117 @@ function extractFirstJson(text) {
   throw new Error('Incomplete JSON in model response.');
 }
 
-function parseModelJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    try {
-      return extractFirstJson(text);
-    } catch (innerError) {
-      const cleaned = stripCodeFences(text).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-      try {
-        return JSON.parse(cleaned);
-      } catch (finalError) {
-        return extractFirstJson(cleaned);
+function autoCloseJson(text) {
+  const cleaned = stripCodeFences(text);
+  const startIndex = cleaned.search(/[\{\[]/);
+  if (startIndex === -1) {
+    return cleaned;
+  }
+  const segment = cleaned.slice(startIndex);
+  let output = '';
+  let inString = false;
+  let escaped = false;
+  const closeStack = [];
+
+  for (let i = 0; i < segment.length; i += 1) {
+    const char = segment[i];
+    output += char;
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (char === '{') closeStack.push('}');
+    if (char === '[') closeStack.push(']');
+    if ((char === '}' || char === ']') && closeStack.length) {
+      const expected = closeStack[closeStack.length - 1];
+      if (char === expected) {
+        closeStack.pop();
       }
     }
   }
+
+  if (inString) {
+    output += '"';
+  }
+  while (closeStack.length) {
+    output += closeStack.pop();
+  }
+  return removeTrailingCommas(stripJsonComments(output));
 }
 
-async function callOpenAICompatible({ provider, prompt }) {
+function tryParseJsonCandidates(candidates) {
+  for (const candidate of candidates) {
+    if (!candidate || !candidate.trim()) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch (error) {
+      try {
+        return extractFirstJson(candidate);
+      } catch (innerError) {
+        // continue trying
+      }
+    }
+  }
+  throw new Error('Model response is not valid JSON.');
+}
+
+function parseModelJson(text) {
+  const cleanedQuotes = stripCodeFences(text).replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+  const autoClosed = autoCloseJson(cleanedQuotes);
+  const normalized = removeTrailingCommas(stripJsonComments(cleanedQuotes));
+  return tryParseJsonCandidates([text, normalized, autoClosed]);
+}
+
+function clampScore(value, fallbackValue) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return fallbackValue;
+  return Math.max(0, Math.min(100, Math.round(next)));
+}
+
+function normalizeReport(report) {
+  const fallback = mockReport;
+  const source = report && typeof report === 'object' ? report : {};
+  const insights = Array.isArray(source.insights) ? source.insights : fallback.insights;
+  return {
+    total: clampScore(source.total, fallback.total),
+    need: clampScore(source.need, fallback.need),
+    style: clampScore(source.style, fallback.style),
+    objection: clampScore(source.objection, fallback.objection),
+    close: clampScore(source.close, fallback.close),
+    status: typeof source.status === 'string' && source.status.trim() ? source.status : fallback.status,
+    report_markdown:
+      typeof source.report_markdown === 'string' && source.report_markdown.trim()
+        ? source.report_markdown
+        : fallback.report_markdown,
+    insights: insights
+      .map((item) => ({
+        title: item?.title || '待补充问题点',
+        content: item?.content || '请补充具体问题描述。',
+        logic: item?.logic || item?.logic_analysis || '请补充底层逻辑分析。',
+        script: item?.script || item?.template || '请补充可直接复用的话术。',
+        tag: item?.tag || '待分类',
+      }))
+      .slice(0, 8),
+  };
+}
+
+function shouldRetryForJsonError(error) {
+  const message = `${error?.message || ''}`.toLowerCase();
+  return message.includes('json') || message.includes('content');
+}
+
+async function callOpenAICompatible({ provider, prompt, forceJsonMode = true }) {
   const baseUrl = provider.base_url || 'https://api.openai.com/v1';
   const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
   const payload = {
@@ -1053,6 +1446,9 @@ async function callOpenAICompatible({ provider, prompt }) {
     ],
     temperature: 0.2,
   };
+  if (forceJsonMode) {
+    payload.response_format = { type: 'json_object' };
+  }
 
   const response = await fetchWithTimeout(
     url,
@@ -1108,6 +1504,25 @@ async function callAnthropic({ provider, prompt }) {
   const text = data?.content?.[0]?.text;
   if (!text) throw new Error('Anthropic API response missing content');
   return parseModelJson(text);
+}
+
+async function callModelWithRetry({ provider, prompt }) {
+  const repairPrompt = `${prompt}
+
+请务必只输出一个完整 JSON 对象，不要输出任何解释、代码块标记、前后缀文本。`;
+
+  try {
+    if (provider.type === 'anthropic') {
+      return await callAnthropic({ provider, prompt });
+    }
+    return await callOpenAICompatible({ provider, prompt, forceJsonMode: true });
+  } catch (error) {
+    if (!shouldRetryForJsonError(error)) throw error;
+    if (provider.type === 'anthropic') {
+      return callAnthropic({ provider, prompt: repairPrompt });
+    }
+    return callOpenAICompatible({ provider, prompt: repairPrompt, forceJsonMode: true });
+  }
 }
 
 function splitBuffer(buffer, separator) {
@@ -1537,6 +1952,156 @@ async function transcribeAudio(config, file) {
   throw new Error(`Unsupported STT provider: ${provider.type}`);
 }
 
+async function runSingleReviewPipeline(payload) {
+  const config = readConfigFile();
+  const { config: provider } = getActiveProvider(config);
+  if (!provider?.api_key) {
+    throw createAppError('MISSING_PROVIDER_API_KEY', 'Missing API key for active provider.', 500);
+  }
+
+  const fileBuffer = fs.readFileSync(payload.file.path);
+  let fileInfo = {
+    filename: payload.file.filename,
+    contentType: payload.file.contentType || 'application/octet-stream',
+    path: payload.file.path,
+    data: fileBuffer,
+  };
+  if (config.tos?.enabled) {
+    const uploaded = await uploadToTos(fileInfo, config.tos);
+    fileInfo = { ...fileInfo, publicUrl: uploaded.url, tosObjectKey: uploaded.objectKey };
+  }
+
+  const sttResult = await transcribeAudio(config, fileInfo);
+  const normalized = normalizeUtterances(sttResult.utterances, sttResult.words);
+  const labeled = labelUtterances(normalized);
+  const transcript = buildTranscript(labeled) || sttResult.transcript || '';
+  const prompt = buildPrompt(transcript, payload.templates || []);
+  const report = normalizeReport(await callModelWithRetry({ provider, prompt }));
+
+  return {
+    report,
+    transcript,
+    utterances: labeled,
+    stt_debug: buildSttDebugPayload(sttResult, fileInfo),
+  };
+}
+
+function createReviewJobRecord({ requestId, ownerKey, payload }) {
+  const now = Date.now();
+  return {
+    id: crypto.randomUUID(),
+    requestId,
+    ownerKey,
+    payload,
+    status: 'queued',
+    createdAt: now,
+    updatedAt: now,
+    startedAt: null,
+    finishedAt: null,
+    result: null,
+    error: null,
+  };
+}
+
+function enqueueReviewJob({ requestId, ownerKey, payload }) {
+  const queuedCount = reviewJobQueue.length + reviewWorkersInFlight;
+  if (queuedCount >= REVIEW_JOB_MAX_PENDING) {
+    throw createAppError('REVIEW_QUEUE_FULL', '当前排队任务较多，请稍后重试。', 503, {
+      queue_length: reviewJobQueue.length,
+      max_pending: REVIEW_JOB_MAX_PENDING,
+    });
+  }
+  const job = createReviewJobRecord({ requestId, ownerKey, payload });
+  reviewJobStore.set(job.id, job);
+  reviewJobQueue.push(job.id);
+  return job;
+}
+
+function getReviewQueueMetrics() {
+  return {
+    mode: REVIEW_JOB_DEFAULT_MODE,
+    in_flight: reviewWorkersInFlight,
+    queued: reviewJobQueue.length,
+    concurrency: REVIEW_JOB_CONCURRENCY,
+    max_pending: REVIEW_JOB_MAX_PENDING,
+  };
+}
+
+function buildReviewJobPublicPayload(job) {
+  const base = {
+    ok: job.status !== 'failed',
+    job_id: job.id,
+    status: job.status,
+    created_at: new Date(job.createdAt).toISOString(),
+    started_at: job.startedAt ? new Date(job.startedAt).toISOString() : null,
+    finished_at: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    poll_after_ms: REVIEW_JOB_POLL_AFTER_MS,
+  };
+
+  if (job.status === 'queued') {
+    return {
+      ...base,
+      queue_position: Math.max(1, reviewJobQueue.indexOf(job.id) + 1),
+      message: '任务已提交，正在排队处理中。',
+    };
+  }
+  if (job.status === 'processing') {
+    return {
+      ...base,
+      message: '任务处理中，正在进行转写与复盘。',
+    };
+  }
+  if (job.status === 'succeeded') {
+    return {
+      ...base,
+      ...job.result,
+      message: '复盘已完成。',
+    };
+  }
+  return {
+    ...base,
+    ...(job.error || {}),
+    message: job.error?.message || '复盘失败。',
+  };
+}
+
+function runReviewJobQueue() {
+  while (reviewWorkersInFlight < REVIEW_JOB_CONCURRENCY && reviewJobQueue.length > 0) {
+    const jobId = reviewJobQueue.shift();
+    const job = reviewJobStore.get(jobId);
+    if (!job || job.status !== 'queued') {
+      continue;
+    }
+    reviewWorkersInFlight += 1;
+    job.status = 'processing';
+    job.startedAt = Date.now();
+    job.updatedAt = job.startedAt;
+    logReviewJobEvent('info', 'review_job_start', job);
+
+    runSingleReviewPipeline(job.payload)
+      .then((result) => {
+        job.result = result;
+        job.status = 'succeeded';
+      })
+      .catch((error) => {
+        job.error = normalizeJobError(error, 'Review failed');
+        job.status = 'failed';
+      })
+      .finally(() => {
+        job.finishedAt = Date.now();
+        job.updatedAt = job.finishedAt;
+        logReviewJobEvent(job.status === 'failed' ? 'error' : 'info', 'review_job_finish', job, {
+          elapsed_ms: job.startedAt ? job.finishedAt - job.startedAt : undefined,
+          error_code: job.error?.error_code,
+        });
+        tryRemoveFile(job.payload?.file?.path);
+        reviewWorkersInFlight -= 1;
+        pruneReviewJobs();
+        runReviewJobQueue();
+      });
+  }
+}
+
 function collectBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -1565,7 +2130,8 @@ function parseMultipartForm(req) {
     const form = new IncomingForm({
       multiples: false,
       keepExtensions: true,
-      maxFileSize: 200 * 1024 * 1024,
+      maxFileSize: MAX_AUDIO_FILE_SIZE_BYTES,
+      maxTotalFileSize: MAX_AUDIO_FILE_SIZE_BYTES,
     });
     form.parse(req, (err, fields, files) => {
       if (err) {
@@ -1578,12 +2144,22 @@ function parseMultipartForm(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+  req.requestId = createRequestId();
+  req.startedAt = Date.now();
+  res.setHeader('X-Request-Id', req.requestId);
+  logRequestStart(req);
+  res.on('finish', () => {
+    logRequestFinish(req, res.statusCode);
+  });
+
   applySecurityHeaders(res);
   const url = new URL(req.url, `http://${req.headers.host}`);
   const requestPath = `${url.pathname}${url.search || ''}`;
 
   if (url.pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true });
+    pruneReviewJobs();
+    cleanupRateLimitStore();
+    return sendJson(res, 200, { ok: true, review_queue: getReviewQueueMetrics() });
   }
 
   if (url.pathname === '/api/me') {
@@ -1672,7 +2248,40 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ok: true });
   }
 
+  const reviewJobMatch = url.pathname.match(/^\/api\/review\/jobs\/([a-f0-9-]+)$/i);
+  if (reviewJobMatch && req.method === 'GET') {
+    if (!enforceRateLimit(req, res, 'review_status', RATE_LIMIT_REVIEW_STATUS)) return;
+    pruneReviewJobs();
+    const auth = getAuthContext(req, requestPath);
+    if (!auth.ok) {
+      return sendJson(res, 401, {
+        ok: false,
+        message: '请先通过飞书登录后再使用复盘功能',
+        login_url: auth.loginUrl,
+      });
+    }
+    const jobId = reviewJobMatch[1];
+    const job = reviewJobStore.get(jobId);
+    if (!job) {
+      return sendJson(res, 404, {
+        ok: false,
+        error_code: 'REVIEW_JOB_NOT_FOUND',
+        message: '任务不存在，可能已过期。',
+      });
+    }
+    const currentOwnerKey = buildJobOwnerKey(auth.user, req);
+    if (job.ownerKey && currentOwnerKey !== job.ownerKey) {
+      return sendJson(res, 403, {
+        ok: false,
+        error_code: 'REVIEW_JOB_FORBIDDEN',
+        message: '无权查看该任务。',
+      });
+    }
+    return sendJson(res, 200, buildReviewJobPublicPayload(job));
+  }
+
   if (url.pathname === '/api/review' && req.method === 'POST') {
+    if (!enforceRateLimit(req, res, 'review_create', RATE_LIMIT_REVIEW_CREATE)) return;
     const auth = getAuthContext(req, requestPath);
     if (!auth.ok) {
       return sendJson(res, 401, {
@@ -1683,87 +2292,93 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const { fields, files } = await parseMultipartForm(req);
-      let audioFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
+      const audioFile = extractAudioFileFromMultipart(files);
       if (!audioFile) {
-        const firstKey = Object.keys(files)[0];
-        const firstFile = firstKey ? files[firstKey] : null;
-        audioFile = Array.isArray(firstFile) ? firstFile[0] : firstFile;
-      }
-      if (!audioFile) {
-        return sendJson(res, 400, {
-          ok: false,
-          message: 'Missing audio file.',
+        const missingFileError = createAppError('MISSING_AUDIO_FILE', 'Missing audio file.', 400, {
           debug: {
             contentType: req.headers['content-type'] || '',
             fileKeys: Object.keys(files || {}),
             fieldKeys: Object.keys(fields || {}),
           },
         });
+        return sendJson(res, 400, {
+          ...buildErrorPayload(req, missingFileError, 'Missing audio file.'),
+        });
       }
 
+      validateUploadedAudioFile(audioFile);
       const fileBuffer = fs.readFileSync(audioFile.filepath);
-      const file = {
+      const inputFile = {
         filename: audioFile.originalFilename || 'audio',
         contentType: audioFile.mimetype || 'application/octet-stream',
         data: fileBuffer,
       };
+      const savedFile = saveUploadedFile(inputFile);
+      tryRemoveFile(audioFile.filepath);
+      const templates = parseTemplatesFromFields(fields);
+      const mode = resolveReviewMode(url);
 
-      let templates = [];
-      if (fields.templates) {
+      if (mode === 'sync') {
         try {
-          const rawTemplates = Array.isArray(fields.templates) ? fields.templates[0] : fields.templates;
-          templates = JSON.parse(rawTemplates);
+          const result = await runSingleReviewPipeline({
+            templates,
+            file: {
+              ...savedFile,
+              contentType: inputFile.contentType,
+            },
+          });
+          tryRemoveFile(savedFile.path);
+          return sendJson(res, 200, {
+            ok: true,
+            mode: 'sync',
+            ...result,
+          });
         } catch (error) {
-          templates = [];
+          tryRemoveFile(savedFile.path);
+          throw error;
         }
       }
-      const config = readConfigFile();
-      const savedFile = saveUploadedFile(file);
-      let fileInfo = { ...file, ...savedFile };
-      if (config.tos?.enabled) {
-        const uploaded = await uploadToTos(fileInfo, config.tos);
-        fileInfo = { ...fileInfo, publicUrl: uploaded.url, tosObjectKey: uploaded.objectKey };
-      }
-      const sttResult = await transcribeAudio(config, fileInfo);
-      const normalized = normalizeUtterances(sttResult.utterances, sttResult.words);
-      const labeled = labelUtterances(normalized);
-      const transcript = buildTranscript(labeled) || sttResult.transcript || '';
 
-      const prompt = buildPrompt(transcript, templates);
-      const { config: provider } = getActiveProvider(config);
-      let report;
-      if (provider.type === 'anthropic') {
-        report = await callAnthropic({ provider, prompt });
-      } else {
-        report = await callOpenAICompatible({ provider, prompt });
-      }
-
-      return sendJson(res, 200, {
-        ok: true,
-        report,
-        transcript,
-        utterances: labeled,
-        stt_debug: {
-          ...sttResult.debug,
-          file: {
-            filename: fileInfo.filename,
-            contentType: fileInfo.contentType,
-            size: fileInfo.data?.length || 0,
-            publicUrl: fileInfo.publicUrl,
-            tosObjectKey: fileInfo.tosObjectKey,
+      let job;
+      try {
+        job = enqueueReviewJob({
+          requestId: req.requestId,
+          ownerKey: buildJobOwnerKey(auth.user, req),
+          payload: {
+            templates,
+            file: {
+              ...savedFile,
+              contentType: inputFile.contentType,
+            },
           },
-        },
+        });
+      } catch (error) {
+        tryRemoveFile(savedFile.path);
+        throw error;
+      }
+      runReviewJobQueue();
+      return sendJson(res, 202, {
+        ok: true,
+        accepted: true,
+        mode: 'async',
+        job_id: job.id,
+        status: job.status,
+        queue_position: job.status === 'queued' ? Math.max(1, reviewJobQueue.indexOf(job.id) + 1) : 0,
+        poll_url: `/api/review/jobs/${job.id}`,
+        poll_after_ms: REVIEW_JOB_POLL_AFTER_MS,
+        message: '任务已提交，正在排队处理中。',
       });
     } catch (error) {
-      return sendJson(res, 200, {
-        ok: false,
-        message: error.message,
+      const status = resolveErrorStatus(error, 500);
+      return sendJson(res, status, {
+        ...buildErrorPayload(req, error, 'Review failed'),
         stt_debug: error.debug,
       });
     }
   }
 
   if (url.pathname === '/api/analyze' && req.method === 'POST') {
+    if (!enforceRateLimit(req, res, 'analyze', RATE_LIMIT_ANALYZE)) return;
     const auth = getAuthContext(req, requestPath);
     if (!auth.ok) {
       return sendJson(res, 401, {
@@ -1774,26 +2389,27 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const raw = await collectBody(req);
-      const body = JSON.parse(raw || '{}');
+      let body;
+      try {
+        body = JSON.parse(raw || '{}');
+      } catch (error) {
+        throw createAppError('INVALID_REQUEST_BODY', 'Invalid JSON body.', 400);
+      }
       const config = readConfigFile();
       const { config: provider } = getActiveProvider(config);
 
       if (!provider?.api_key) {
-        return sendJson(res, 200, { ok: true, report: mockReport, message: 'Missing API key, fallback to mock.' });
+        const missingKeyError = createAppError('MISSING_PROVIDER_API_KEY', 'Missing API key for active provider.', 500);
+        return sendJson(res, 500, buildErrorPayload(req, missingKeyError, 'Missing API key for active provider.'));
       }
 
       const prompt = buildPrompt(body.transcript || '', body.templates || []);
-      let report;
-
-      if (provider.type === 'anthropic') {
-        report = await callAnthropic({ provider, prompt });
-      } else {
-        report = await callOpenAICompatible({ provider, prompt });
-      }
+      const report = normalizeReport(await callModelWithRetry({ provider, prompt }));
 
       return sendJson(res, 200, { ok: true, report });
     } catch (error) {
-      return sendJson(res, 200, { ok: true, report: mockReport, message: error.message });
+      const status = resolveErrorStatus(error, 500);
+      return sendJson(res, status, buildErrorPayload(req, error, 'Analyze failed'));
     }
   }
 
@@ -1822,3 +2438,12 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
+const maintenanceTimer = setInterval(() => {
+  cleanupExpiredAuthCache();
+  cleanupRateLimitStore();
+  pruneReviewJobs();
+}, 60 * 1000);
+if (typeof maintenanceTimer.unref === 'function') {
+  maintenanceTimer.unref();
+}

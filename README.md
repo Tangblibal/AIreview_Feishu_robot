@@ -5,7 +5,7 @@
 - 后端：Node.js 原生 `http` 服务（无需额外依赖，内置代理 API）
 - AI 接入：OpenAI / Anthropic / Deepseek / Doubao / Qwen（均为可配置）
 
-> 如需升级为生产级（权限、数据库、任务队列、文件存储），推荐迁移到 Next.js + PostgreSQL + Redis + 对象存储。
+> 当前版本已内置轻量异步任务队列与限流；如需生产级多副本与持久化队列，推荐迁移到 Next.js + PostgreSQL + Redis + 对象存储。
 
 ## 运行方式
 1. 直接打开 `index.html`（仅前端演示，不调用 AI）。
@@ -43,6 +43,8 @@ cp .env.example .env
 - LLM：`ACTIVE_PROVIDER` + 对应 `*_API_KEY`
 - STT：`STT_ACTIVE_PROVIDER` + 对应 `STT_*`
 - TOS（可选）：`TOS_*`
+- 上传限制与调试：`MAX_AUDIO_FILE_SIZE_MB`、`STT_DEBUG_ENABLED`
+- 异步与限流：`REVIEW_JOB_*`、`RATE_LIMIT_*`
 
 3. 启动服务：
 
@@ -54,24 +56,42 @@ npm start
 - `ACTIVE_PROVIDER=deepseek`
 - `DEEPSEEK_API_KEY=...`
 - `STT_ACTIVE_PROVIDER=doubao_asr_2`
-- `STT_DOUBAO_ASR_2_PUBLIC_BASE_URL=https://your-app.up.railway.app`
+- `STT_DOUBAO_ASR_2_PUBLIC_BASE_URL=https://app.qjgroup.top`
 - `TOS_ENABLED=true`
 
-## Railway 部署步骤
-1. 把项目推送到 GitHub（私有仓库即可）。
-2. 在 Railway 新建项目并连接仓库。
-3. 部署配置：
-- 已提供 `railway.json`（包含 `npm start` 与 `/api/health` 健康检查）
-- 如需在 UI 手动设置：Build Command `npm ci`，Start Command `npm start`
-4. 在 Railway Variables 中填写环境变量（参考 `.env.example`）。
-5. 首次部署后拿到公网域名（如 `https://xxx.up.railway.app`），并把：
-- `STT_DOUBAO_ASR_2_PUBLIC_BASE_URL`（或 `STT_QWEN_FUN_ASR_PUBLIC_BASE_URL`）设置为该公网地址。
-6. 若保留本地上传目录，建议挂载 Volume 到 `uploads` 目录（避免重启丢文件）。
-7. 验收：
-- `GET /api/health` 返回 `{"ok":true}`
-- 上传一段音频，确认 `/api/review` 可返回复盘结果
+## Railway 预发（先跑通）
+适合先做功能联调与验收，部署快、运维轻。
 
-> 说明：Railway 适合快速验证，不保证中国大陆长期稳定可达。面向大陆员工长期使用，建议迁移到中国大陆云厂商并完成备案。
+1. 准备 GitHub 仓库并推送代码。
+2. Railway 新建项目并连接仓库。
+3. 在 `Variables` 中按 `deploy/railway/variables.min.example` 填值。
+4. 首次部署后，在 `Networking` 查看默认域名 `https://<service>.up.railway.app`。
+5. 回填变量 `STT_DOUBAO_ASR_2_PUBLIC_BASE_URL` 为真实 Railway 域名并 redeploy。
+6. 验收命令：
+
+```bash
+curl -i https://<service>.up.railway.app/api/health
+BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/volcengine/smoke-test.sh
+```
+
+说明：
+- Railway 适合预发，不保证中国大陆长期稳定可达。
+- 详细步骤见 `deploy/railway/STAGING.md`。
+- 控制台逐点击路径见 `deploy/railway/RAILWAY_UI_CHECKLIST.md`。
+
+## 生产部署（火山引擎，推荐）
+完整步骤见下方“火山引擎上线执行清单”。你可以直接使用仓库内模板文件部署：
+- `deploy/volcengine/deploy.sh`：拉取代码、安装依赖、重启服务
+- `deploy/volcengine/smoke-test.sh`：健康检查 + 复盘任务提交流程
+- `deploy/volcengine/lumo-review.service`：systemd 服务模板
+- `deploy/volcengine/nginx.app.qjgroup.top.conf`：Nginx 站点模板
+- `deploy/volcengine/lumo-review.env.example`：生产环境变量模板
+- `deploy/railway/variables.min.example`：Railway 预发变量模板
+
+## 双环境域名建议
+- `staging.qjgroup.top` -> Railway（预发）
+- `app.qjgroup.top` -> 火山引擎（生产）
+- 不建议把生产主域直接指向 Railway；大陆访问稳定性不可控。
 
 ## 飞书开放平台接入（员工登录）
 当前版本已内置飞书 OAuth 登录入口，支持保护 `/api/analyze` 与 `/api/review`。
@@ -114,8 +134,61 @@ npm start
    - 服务做主备与监控告警（CPU/内存/5xx/延迟）
    - 为 ASR/LLM 接口配置超时、重试、降级策略
 
+## 火山引擎上线执行清单（当前目标：先不上飞书）
+以下步骤默认你先把网页应用功能跑稳，不启用飞书登录。
+
+1. 服务器准备（火山引擎 ECS）
+   - 创建 ECS（建议中国大陆地域）
+   - 安装 Node.js 18+ 与 Nginx
+   - 拉取项目代码到服务器目录（建议 `/opt/qjgroup-ai-review`）
+   - 创建运行用户：`sudo useradd -r -s /sbin/nologin www-data || true`
+
+2. 应用环境变量（生产）
+   - 复制模板：`sudo cp deploy/volcengine/lumo-review.env.example /etc/lumo-review.env`
+   - 编辑 `/etc/lumo-review.env` 填入真实密钥（DeepSeek、ASR、TOS）
+   - 核对 `STT_DOUBAO_ASR_2_PUBLIC_BASE_URL=https://app.qjgroup.top`
+
+3. systemd 服务（建议）
+   - 复制模板：`sudo cp deploy/volcengine/lumo-review.service /etc/systemd/system/lumo-review.service`
+   - 安装依赖并启动：`npm ci --omit=dev && sudo systemctl daemon-reload && sudo systemctl enable --now lumo-review`
+   - 查看状态：`sudo systemctl status lumo-review --no-pager`
+
+4. Nginx 反向代理
+   - 复制模板：`sudo cp deploy/volcengine/nginx.app.qjgroup.top.conf /etc/nginx/conf.d/app.qjgroup.top.conf`
+   - 生效配置：`sudo nginx -t && sudo systemctl reload nginx`
+   - 模板已包含 `Host/X-Forwarded-*` 透传和 `client_max_body_size 60m`
+
+5. 域名与证书
+   - 在火山引擎云解析添加 `app.qjgroup.top` 记录
+   - 申请并绑定 TLS 证书（HTTPS）
+   - 验证 `https://app.qjgroup.top/api/health`
+
+6. 合规（大陆必做）
+   - 完成 ICP 备案（按政策要求）
+   - 视业务场景完成公安联网备案
+
+7. 上线验收命令
+```bash
+curl -i https://app.qjgroup.top/api/health
+curl -i -X POST https://app.qjgroup.top/api/analyze -H 'Content-Type: application/json' -d '{"transcript":"test","templates":[]}'
+curl -i -X POST https://app.qjgroup.top/api/review -F 'audio=@/path/demo.m4a' -F 'templates=[]'
+# 假设上一步返回 job_id，再查询：
+curl -i https://app.qjgroup.top/api/review/jobs/<job_id>
+# 或直接执行仓库脚本（建议）
+BASE_URL=https://app.qjgroup.top AUDIO_FILE=/path/demo.m4a ./deploy/volcengine/smoke-test.sh
+```
+
+说明：
+- 所有错误返回均带 `request_id`，可直接去服务日志按 `request_id` 检索定位问题。
+- `/api/review` 已增加音频类型/大小校验、异步队列与限流，异常会返回明确错误码与信息。
+
+8. 中国大陆可用性测试（建议最少做 3 组）
+   - 用中国移动/联通/电信各 1 条网络，访问 `https://app.qjgroup.top`
+   - 在北京、上海、广州各找 1 位同事做页面打开与上传复盘测试
+   - 记录首屏时间、任务完成时间、失败率（超时/5xx），连续观察 3-7 天
+
 ## 功能一览
-- 高级感 UI 设计 + 行业信息
+- 高级感 UI 设计
 - 上传录音（演示）
 - 复盘评分、关键改进点
 - 门店话术模板配置（本地保存）

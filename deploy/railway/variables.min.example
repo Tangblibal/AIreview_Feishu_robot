@@ -1,0 +1,49 @@
+# Railway staging minimum required variables
+
+# Server
+PORT=3000
+MAX_AUDIO_FILE_SIZE_MB=50
+STT_DEBUG_ENABLED=false
+REVIEW_JOB_MODE=async
+REVIEW_JOB_CONCURRENCY=1
+RATE_LIMIT_REVIEW_CREATE=6
+
+# Auth (disabled for staging)
+FEISHU_ENABLED=false
+AUTH_REQUIRED=false
+
+# LLM
+ACTIVE_PROVIDER=deepseek
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+DEEPSEEK_API_KEY=replace_with_real_key
+DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_TIMEOUT_MS=600000
+
+# STT
+STT_ACTIVE_PROVIDER=doubao_asr_2
+STT_DOUBAO_ASR_2_TYPE=volcengine-asr2
+STT_DOUBAO_ASR_2_BASE_URL=https://openspeech.bytedance.com/api/v3/auc/bigmodel
+STT_DOUBAO_ASR_2_APP_ID=replace_with_real_app_id
+STT_DOUBAO_ASR_2_ACCESS_TOKEN=replace_with_real_access_token
+STT_DOUBAO_ASR_2_RESOURCE_ID=volc.seedasr.auc
+STT_DOUBAO_ASR_2_MODEL_NAME=bigmodel
+STT_DOUBAO_ASR_2_ENABLE_ITN=true
+STT_DOUBAO_ASR_2_ENABLE_PUNC=true
+STT_DOUBAO_ASR_2_ENABLE_SPEAKER_INFO=true
+STT_DOUBAO_ASR_2_SHOW_UTTERANCES=true
+# First deploy can keep placeholder, then replace with real Railway domain and redeploy:
+# e.g. https://your-service.up.railway.app
+STT_DOUBAO_ASR_2_PUBLIC_BASE_URL=https://your-service.up.railway.app
+STT_DOUBAO_ASR_2_PUBLIC_PATH=/uploads
+STT_DOUBAO_ASR_2_POLL_INTERVAL_MS=3000
+STT_DOUBAO_ASR_2_POLL_MAX_ATTEMPTS=200
+
+# TOS (required when ASR fetches public URL)
+TOS_ENABLED=true
+TOS_BUCKET=replace_with_real_bucket
+TOS_REGION=cn-shanghai
+TOS_ENDPOINT=tos-cn-shanghai.volces.com
+TOS_ACCESS_KEY=replace_with_real_access_key
+TOS_SECRET_KEY=replace_with_real_secret_key
+TOS_KEY_PREFIX=uploads
+TOS_PRESIGN_EXPIRES=900

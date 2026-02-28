@@ -8,11 +8,13 @@
 1. Railway 控制台 -> `New Project` -> `Deploy from GitHub repo`。
 2. 选择本仓库。
 3. 等待首次构建完成。
+4. 在同一 Project 内再创建一个 `Redis` 服务（用于异步任务持久化）。
 
 ## 3. 填写变量
 1. 进入 Railway 项目 -> `Variables`。
 2. 以 `deploy/railway/variables.min.example` 为模板逐项填写。
 3. 先临时填写 `STT_DOUBAO_ASR_2_PUBLIC_BASE_URL=https://your-service.up.railway.app`。
+4. 确认 `REVIEW_JOB_STORE_BACKEND=redis` 且 `REDIS_URL=${{Redis.REDIS_URL}}`。
 
 ## 4. 回填公网域名并二次部署
 1. 进入 Railway 项目 -> `Settings` -> `Networking`，查看默认域名（`*.up.railway.app`）。
@@ -33,3 +35,4 @@
 - Railway 预发用于快速验证功能，不等同于中国大陆长期稳定可用。
 - 若 `*.up.railway.app` 在大陆链路受限，换自定义域名通常不能从根本解决可达性。
 - 生产环境建议继续使用火山引擎中国大陆源站。
+- 异步任务要稳定可追踪，必须启用 Redis 持久化队列；建议 `Replicas=1`，避免多副本下本地临时文件不可见带来的转写失败。

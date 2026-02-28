@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>光影复盘 · 摄影写真销售复盘机器人</title>
+    <title>阁外男士摄影工作室 · 销售复盘系统</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -12,10 +12,13 @@
 
     <header class="nav">
       <div class="brand">
-        <div class="logo">LUMO</div>
+        <div class="brand-wordmark" aria-label="阁外男士摄影工作室 LOGO">
+          <span class="wordmark-en">GEWAI</span>
+          <span class="wordmark-cn">阁外</span>
+        </div>
         <div class="brand-text">
-          <div class="brand-name">光影复盘</div>
-          <div class="brand-tag">摄影写真行业 · AI 销售复盘机器人</div>
+          <div class="brand-name">阁外男士摄影工作室</div>
+          <div class="brand-tag">Men's Portrait Studio · Sales Review Intelligence</div>
         </div>
       </div>
       <nav class="nav-links">
@@ -28,10 +31,10 @@
     <main class="layout" id="report">
       <section class="hero">
         <div class="hero-left">
-          <p class="eyebrow">专为摄影写真门店打造</p>
-          <h1>把每一次咨询，变成更精准的风格成交</h1>
+          <p class="eyebrow">内部销售复盘系统</p>
+          <h1>把每一次男士咨询，沉淀为可复制的成交方法</h1>
           <p class="lead">
-            识别咨询流程、风格偏好、异议处理与成交动作，自动输出可执行的复盘建议与话术改进。
+            聚焦男士形象拍摄场景，识别需求洞察、风格匹配、预算异议与锁档动作，自动输出可执行话术与复盘策略。
           </p>
           <div class="hero-actions">
             <button class="cta" id="quickDemo">一键演示</button>
@@ -56,12 +59,58 @@
           <div class="glass-card upload-card">
             <div class="card-title">上传销售录音</div>
             <p class="card-sub">支持 mp3 / wav / m4a · 自动分离客户/销售</p>
-            <label class="upload-area" for="audioUpload">
-              <input id="audioUpload" type="file" accept="audio/*" />
-              <div class="upload-icon">♫</div>
-              <div class="upload-text">拖拽或点击上传销售录音</div>
-              <div class="upload-hint">摄影写真咨询 · 套餐报价 · 档期沟通</div>
-            </label>
+            <div class="upload-main">
+              <label class="upload-area" for="audioUpload">
+                <input id="audioUpload" type="file" accept="audio/*" />
+                <div class="upload-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path
+                      d="M14 3v10.8a3.6 3.6 0 1 1-1.6-3V6.2l8-2.2v7.9a3.6 3.6 0 1 1-1.6-3V6.1L14 7.4Z"
+                    />
+                  </svg>
+                </div>
+                <div class="upload-text">拖拽或点击上传销售录音</div>
+                <div class="upload-hint">男士形象咨询 · 套餐报价 · 锁档推进</div>
+              </label>
+              <div class="sales-context-card">
+                <div class="sales-context-title">成交补充信息</div>
+                <p class="sales-context-sub">可选填写，系统会把该信息注入诊断 Prompt。</p>
+                <div class="sales-context-grid">
+                  <label class="sales-field">
+                    <span>是否订单</span>
+                    <select id="hasOrder">
+                      <option value="unknown">未填写</option>
+                      <option value="yes">已下单</option>
+                      <option value="no">未下单</option>
+                    </select>
+                  </label>
+                  <label class="sales-field">
+                    <span>订单金额（元）</span>
+                    <input id="orderAmount" type="number" min="0" step="0.01" placeholder="如：6999" />
+                  </label>
+                  <label class="sales-field">
+                    <span>内景套数</span>
+                    <input id="indoorSets" type="number" min="0" step="1" placeholder="0" />
+                  </label>
+                  <label class="sales-field">
+                    <span>外景套数</span>
+                    <input id="outdoorSets" type="number" min="0" step="1" placeholder="0" />
+                  </label>
+                  <label class="sales-field">
+                    <span>精修数量</span>
+                    <input id="retouchedCount" type="number" min="0" step="1" placeholder="如：35" />
+                  </label>
+                  <label class="sales-field">
+                    <span>产品数量</span>
+                    <input id="productCount" type="number" min="0" step="1" placeholder="如：4" />
+                  </label>
+                  <label class="sales-field">
+                    <span>视频数量</span>
+                    <input id="videoCount" type="number" min="0" step="1" placeholder="如：2" />
+                  </label>
+                </div>
+              </div>
+            </div>
             <div class="upload-actions">
               <button class="cta" id="analyzeBtn">开始复盘</button>
               <button class="ghost" id="exportReport">导出报告</button>
@@ -221,8 +270,8 @@
     </main>
 
     <footer class="footer">
-      <div>© 2026 光影复盘 · 摄影写真行业销售复盘机器人</div>
-      <div>数据加密 · 可私有化部署 · 支持门店话术模板</div>
+      <div>© 2026 阁外男士摄影工作室 · 销售复盘系统</div>
+      <div>数据加密 · 门店私有化部署 · 话术模板可配置</div>
     </footer>
 
     <script src="app.js"></script>

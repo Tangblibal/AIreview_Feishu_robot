@@ -33,6 +33,11 @@ echo "[smoke] polling job_id=${job_id}"
 for _ in $(seq 1 "${POLL_MAX}"); do
   status_response="$(curl -fsS "${BASE_URL}/api/review/jobs/${job_id}")"
   echo "${status_response}"
+  ok_flag="$(echo "${status_response}" | sed -n 's/.*"ok":\([^,}]*\).*/\1/p' | tr -d ' ')"
+  if [ "${ok_flag}" = "false" ]; then
+    echo "[smoke] review failed" >&2
+    exit 2
+  fi
   job_status="$(echo "${status_response}" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')"
   if [ "${job_status}" = "succeeded" ]; then
     echo "[smoke] review succeeded"

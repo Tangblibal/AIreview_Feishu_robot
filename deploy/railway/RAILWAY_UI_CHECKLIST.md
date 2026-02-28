@@ -6,12 +6,16 @@
 3. 点击 `Deploy from GitHub repo`。
 4. 选择你的仓库（本项目）。
 5. 等待首次构建结束。
+6. 回到项目主页，点击 `New` -> `Database` -> `Add Redis`。
 
 ## B. 填 Variables
 1. 进入项目后，点击左侧服务卡片。
 2. 点击顶部 `Variables`。
 3. 打开本仓库文件 `deploy/railway/variables.min.example`。
 4. 按键值逐条粘贴到 Railway Variables。
+5. 确认：
+   - `REVIEW_JOB_STORE_BACKEND=redis`
+   - `REDIS_URL=${{Redis.REDIS_URL}}`
 
 ## C. 回填公网域名
 1. 在服务页面点击 `Settings`。
@@ -27,3 +31,4 @@
    `curl -i https://<service>.up.railway.app/api/health`
 3. 上传音频跑通复盘：
    `BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/volcengine/smoke-test.sh`
+4. `Settings` 里确认 `Replicas=1`，避免异步任务在多副本间切换导致临时文件不可见。

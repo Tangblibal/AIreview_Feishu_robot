@@ -21,6 +21,13 @@ const reportContent = document.getElementById('reportContent');
 const authUser = document.getElementById('authUser');
 const loginBtn = document.getElementById('loginBtn');
 const logoutBtn = document.getElementById('logoutBtn');
+const hasOrderInput = document.getElementById('hasOrder');
+const orderAmountInput = document.getElementById('orderAmount');
+const indoorSetsInput = document.getElementById('indoorSets');
+const outdoorSetsInput = document.getElementById('outdoorSets');
+const retouchedCountInput = document.getElementById('retouchedCount');
+const productCountInput = document.getElementById('productCount');
+const videoCountInput = document.getElementById('videoCount');
 const CIRCUMFERENCE = 327;
 const ANALYZE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_POLL_FALLBACK_MS = 3000;
@@ -280,6 +287,11 @@ function updateAnalyzeAvailability() {
   const disabled = disabledByAuth || isAnalyzing;
   if (analyzeBtn) analyzeBtn.disabled = disabled;
   if (audioUpload) audioUpload.disabled = disabled;
+  [hasOrderInput, orderAmountInput, indoorSetsInput, outdoorSetsInput, retouchedCountInput, productCountInput, videoCountInput]
+    .filter(Boolean)
+    .forEach((input) => {
+      input.disabled = disabled;
+    });
   if (uploadArea) uploadArea.classList.toggle('disabled', disabled);
 }
 
@@ -509,6 +521,28 @@ function collectTemplates() {
   return sections.length ? sections : defaultTemplates;
 }
 
+function parseOptionalNumberInput(input, { integer = false } = {}) {
+  if (!input) return null;
+  const raw = input.value?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return null;
+  if (integer) return Math.trunc(value);
+  return Number(value.toFixed(2));
+}
+
+function collectSalesContext() {
+  return {
+    hasOrder: hasOrderInput?.value || 'unknown',
+    orderAmount: parseOptionalNumberInput(orderAmountInput),
+    indoorSets: parseOptionalNumberInput(indoorSetsInput, { integer: true }),
+    outdoorSets: parseOptionalNumberInput(outdoorSetsInput, { integer: true }),
+    retouchedCount: parseOptionalNumberInput(retouchedCountInput, { integer: true }),
+    productCount: parseOptionalNumberInput(productCountInput, { integer: true }),
+    videoCount: parseOptionalNumberInput(videoCountInput, { integer: true }),
+  };
+}
+
 function formatErrorMessage(message, requestId, fallback = '分析失败') {
   const text = message || fallback;
   return requestId ? `${text} · 请求ID ${requestId}` : text;
@@ -642,6 +676,7 @@ async function runAnalysisWithApi() {
     const payload = new FormData();
     payload.append('audio', selectedFile);
     payload.append('templates', JSON.stringify(collectTemplates()));
+    payload.append('sales_context', JSON.stringify(collectSalesContext()));
 
     const response = await fetch('/api/review', {
       method: 'POST',

@@ -4,7 +4,7 @@
   "description": "- 前端：原生 HTML/CSS/JS（便于快速落地与二次开发） - 后端：Node.js 原生 `http` 服务（无需额外依赖，内置代理 API） - AI 接入：OpenAI / Anthropic / Deepseek / Doubao / Qwen（均为可配置）",
   "main": "app.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test",
     "start": "node server.js"
   },
   "keywords": [],
@@ -12,6 +12,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0",
     "@volcengine/tos-sdk": "^2.9.0",
     "formidable": "^3.5.4"
   }

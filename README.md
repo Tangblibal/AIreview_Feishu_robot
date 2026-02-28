@@ -5,7 +5,7 @@
 - 后端：Node.js 原生 `http` 服务（无需额外依赖，内置代理 API）
 - AI 接入：OpenAI / Anthropic / Deepseek / Doubao / Qwen（均为可配置）
 
-> 当前版本已内置轻量异步任务队列与限流；如需生产级多副本与持久化队列，推荐迁移到 Next.js + PostgreSQL + Redis + 对象存储。
+> 当前版本已内置异步任务队列、限流与 Redis 持久化能力，可用于单机生产部署。
 
 ## 运行方式
 1. 直接打开 `index.html`（仅前端演示，不调用 AI）。
@@ -42,7 +42,8 @@ cp .env.example .env
 2. 按需填写 `.env`：
 - LLM：`ACTIVE_PROVIDER` + 对应 `*_API_KEY`
 - STT：`STT_ACTIVE_PROVIDER` + 对应 `STT_*`
-- TOS（可选）：`TOS_*`
+- TOS（必填）：`TOS_*`
+- 飞书机器人（可选）：`FEISHU_BOT_*`
 - 上传限制与调试：`MAX_AUDIO_FILE_SIZE_MB`、`STT_DEBUG_ENABLED`
 - 异步与限流：`REVIEW_JOB_*`、`RATE_LIMIT_*`
 
@@ -57,6 +58,7 @@ npm start
 - `DEEPSEEK_API_KEY=...`
 - `STT_ACTIVE_PROVIDER=doubao_asr_2`
 - `STT_DOUBAO_ASR_2_PUBLIC_BASE_URL=https://app.qjgroup.top`
+- `STT_DOUBAO_ASR_2_SUBMIT_MAX_ATTEMPTS=4`（遇到 429 自动重试）
 - `TOS_ENABLED=true`
 
 ## Railway 预发（先跑通）
@@ -86,6 +88,7 @@ BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/vol
 - `deploy/volcengine/lumo-review.service`：systemd 服务模板
 - `deploy/volcengine/nginx.app.qjgroup.top.conf`：Nginx 站点模板
 - `deploy/volcengine/lumo-review.env.example`：生产环境变量模板
+- `deploy/volcengine/PROD_CN_RUNBOOK.md`：国内生产一键执行手册
 - `deploy/railway/variables.min.example`：Railway 预发变量模板
 
 ## 双环境域名建议
@@ -116,6 +119,35 @@ BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/vol
 - `GET /auth/feishu/login`：发起飞书登录
 - `GET /auth/feishu/callback`：登录回调
 - `POST /auth/logout`：退出登录
+
+## 飞书自建机器人接入（录音 + 文字 -> TOS -> ASR -> LLM -> 回消息）
+当前版本支持两种订阅方式：
+- `webhook`：HTTP 回调到 `POST /api/feishu/bot/events`
+- `long_connection`：服务启动后主动与飞书建立长连接接收事件（你要用的方式）
+
+1. 飞书开放平台配置（企业自建应用）
+   - 开启机器人能力与事件订阅。
+   - 订阅事件：`im.message.receive_v1`
+   - 如果用 `webhook`：请求地址填 `https://你的域名/api/feishu/bot/events`，挑战校验 Token 与 `FEISHU_BOT_VERIFICATION_TOKEN` 一致。
+   - 如果用 `long_connection`：飞书控制台订阅方式选择“长连接接收事件”，不需要填写回调 URL。
+   - 建议先关闭“事件加密”或自行扩展解密逻辑（当前版本只支持明文事件）。
+2. 申请并开通相关权限（以飞书平台实际命名为准）
+   - 读取消息与资源下载相关权限
+   - 发送消息权限
+3. 服务端环境变量
+   - `FEISHU_BOT_ENABLED=true`
+   - `FEISHU_BOT_EVENT_MODE=long_connection`（长连接）或 `webhook`（回调）
+   - `FEISHU_BOT_APP_ID=...`、`FEISHU_BOT_APP_SECRET=...`
+   - `FEISHU_BOT_VERIFICATION_TOKEN=...`（仅 webhook 模式需要）
+   - `FEISHU_BOT_RECEIVE_ID_TYPE=chat_id`（推荐）
+   - `TOS_ENABLED=true` 且完整配置 `TOS_*`
+4. 机器人行为说明
+   - 收到文字消息：缓存用户补充说明并提示发送录音。
+   - 收到音频/文件消息：下载音频并上传 TOS，调用 ASR 转写，再把“补充文字 + 转写文本”送入 LLM。
+   - 复盘完成后：通过飞书机器人主动回发结果文本给用户。
+5. 可选策略
+   - `FEISHU_BOT_REQUIRE_TEXT_WITH_AUDIO=true`：强制先发文字再发录音。
+   - `FEISHU_BOT_REPLY_MAX_LENGTH`：控制回复长度，避免超长消息。
 
 ## 中国大陆长期稳定 + 合规部署建议
 若目标是长期服务中国大陆员工，请按以下基线落地：

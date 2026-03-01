@@ -15,6 +15,11 @@ const {
   mergeTranscriptWithTextInput,
   formatFeishuBotReply,
 } = require('./feishu-bot');
+const {
+  buildFeishuMessageDedupKey,
+  claimInMemoryMessageDedup,
+  updateInMemoryMessageDedupStatus,
+} = require('./feishu-bot-dedup');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = __dirname;
@@ -30,6 +35,7 @@ const reviewJobQueue = [];
 const rateLimitStore = new Map();
 const feishuBotTextContextStore = new Map();
 const feishuBotProcessedEventStore = new Map();
+const feishuBotMessageDedupStore = new Map();
 let reviewWorkersInFlight = 0;
 let reviewJobQueueDrainScheduled = false;
 let feishuBotTenantTokenCache = null;
@@ -1159,6 +1165,10 @@ function getFeishuBotConfig(req) {
     requireTextWithAudio,
     textCacheTtlSec: readEnvNumber('FEISHU_BOT_TEXT_CACHE_TTL_SECONDS') || 15 * 60,
     processedEventTtlSec: readEnvNumber('FEISHU_BOT_EVENT_TTL_SECONDS') || 10 * 60,
+    messageDedupTtlSec: readEnvNumber('FEISHU_BOT_MESSAGE_DEDUP_TTL_SECONDS') || 7 * 24 * 60 * 60,
+    messageDedupRedisPrefix:
+      (readEnvString('FEISHU_BOT_MESSAGE_DEDUP_REDIS_PREFIX') || 'feishu_bot_message_dedup').trim() ||
+      'feishu_bot_message_dedup',
     replyMaxLength: readEnvNumber('FEISHU_BOT_REPLY_MAX_LENGTH') || 3500,
     downloadTimeoutMs: readEnvNumber('FEISHU_BOT_DOWNLOAD_TIMEOUT_MS') || 120000,
     requestTimeoutMs: readEnvNumber('FEISHU_BOT_REQUEST_TIMEOUT_MS') || 20000,
@@ -1177,6 +1187,9 @@ function cleanupExpiredFeishuBotCache() {
   });
   feishuBotProcessedEventStore.forEach((expiresAt, key) => {
     if (!expiresAt || expiresAt <= now) feishuBotProcessedEventStore.delete(key);
+  });
+  feishuBotMessageDedupStore.forEach((record, key) => {
+    if (!record || record.expiresAt <= now) feishuBotMessageDedupStore.delete(key);
   });
   if (feishuBotTenantTokenCache?.expiresAt && feishuBotTenantTokenCache.expiresAt <= now) {
     feishuBotTenantTokenCache = null;
@@ -1219,6 +1232,14 @@ function consumeFeishuPendingText(conversationKey) {
   return `${record.text}`.trim();
 }
 
+function peekFeishuPendingText(conversationKey) {
+  if (!conversationKey) return '';
+  const record = feishuBotTextContextStore.get(conversationKey);
+  if (!record) return '';
+  if (!record.text || record.expiresAt <= Date.now()) return '';
+  return `${record.text}`.trim();
+}
+
 function hasProcessedFeishuEvent(eventId) {
   if (!eventId) return false;
   const expiresAt = feishuBotProcessedEventStore.get(eventId);
@@ -1233,6 +1254,58 @@ function hasProcessedFeishuEvent(eventId) {
 function markFeishuEventProcessed(eventId, ttlSec) {
   if (!eventId) return;
   feishuBotProcessedEventStore.set(eventId, Date.now() + Math.max(30, ttlSec || 30) * 1000);
+}
+
+function resolveFeishuMessageDedupId(message = {}, fileKey = '') {
+  return `${message?.message_id || fileKey || ''}`.trim();
+}
+
+async function claimFeishuBotMessageDedup(config, messageDedupId, requestId) {
+  if (!messageDedupId) return true;
+  const key = buildFeishuMessageDedupKey(config.messageDedupRedisPrefix, messageDedupId);
+  if (!key) return true;
+  const ttlSec = Math.max(30, Number(config.messageDedupTtlSec) || 600);
+  const payload = JSON.stringify({
+    status: 'processing',
+    request_id: requestId,
+    updated_at: nowIso(),
+  });
+
+  if (REDIS_CONNECTION) {
+    try {
+      const claimed = await redisCommand('SET', key, payload, 'NX', 'EX', `${ttlSec}`);
+      return claimed === 'OK';
+    } catch (error) {
+      console.error(`[feishu_bot] dedup redis claim failed: ${error.message}`);
+    }
+  }
+  return claimInMemoryMessageDedup(feishuBotMessageDedupStore, key, ttlSec);
+}
+
+async function updateFeishuBotMessageDedupStatus(config, messageDedupId, status, requestId, extra = {}) {
+  if (!messageDedupId) return;
+  const key = buildFeishuMessageDedupKey(config.messageDedupRedisPrefix, messageDedupId);
+  if (!key) return;
+  const ttlSec = Math.max(30, Number(config.messageDedupTtlSec) || 600);
+  const payload = JSON.stringify({
+    status,
+    request_id: requestId,
+    updated_at: nowIso(),
+    ...extra,
+  });
+
+  if (REDIS_CONNECTION) {
+    try {
+      await redisCommand('SET', key, payload, 'XX', 'EX', `${ttlSec}`);
+      return;
+    } catch (error) {
+      console.error(`[feishu_bot] dedup redis status update failed: ${error.message}`);
+    }
+  }
+  updateInMemoryMessageDedupStatus(feishuBotMessageDedupStore, key, status, ttlSec, Date.now(), {
+    requestId,
+    ...extra,
+  });
 }
 
 async function getFeishuBotTenantAccessToken(config) {
@@ -1420,6 +1493,8 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
   const message = event?.message || {};
   const messageType = `${message.message_type || ''}`.trim();
   const receiveId = resolveFeishuReceiveId(config, event);
+  let messageDedupId = '';
+  let dedupClaimed = false;
   if (!receiveId) {
     console.warn(`[feishu_bot] request_id=${requestId} receive_id missing, skip event.`);
     return;
@@ -1449,13 +1524,22 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
     }
 
     const conversationKey = buildFeishuConversationKey(event);
-    const textInput = consumeFeishuPendingText(conversationKey);
-    if (config.requireTextWithAudio && !textInput) {
+    const pendingTextInput = peekFeishuPendingText(conversationKey);
+    if (config.requireTextWithAudio && !pendingTextInput) {
       await sendFeishuBotTextMessage(config, receiveId, '请先发送文字说明（客户背景、需求等），再发送录音文件。');
       return;
     }
 
-    await sendFeishuBotTextMessage(config, receiveId, '已收到录音，正在上传、转写并生成复盘，请稍候。');
+    messageDedupId = resolveFeishuMessageDedupId(message, fileKey);
+    dedupClaimed = await claimFeishuBotMessageDedup(config, messageDedupId, requestId);
+    if (!dedupClaimed) {
+      console.log(
+        `[feishu_bot] request_id=${requestId} duplicate message skipped: message_dedup_id=${messageDedupId || 'n/a'}`,
+      );
+      return;
+    }
+
+    const textInput = consumeFeishuPendingText(conversationKey);
     const resourceType = resolveFeishuResourceType(messageType);
     const downloaded = await downloadFeishuMessageResource({
       config,
@@ -1476,6 +1560,7 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
       throw createAppError('TOS_REQUIRED', '飞书机器人模式要求先启用并配置 TOS。', 503);
     }
 
+    await sendFeishuBotTextMessage(config, receiveId, '已收到录音，正在上传、转写并生成复盘，请稍候。');
     const result = await runSingleReviewPipeline({
       templates: [],
       salesContext: {},
@@ -1493,8 +1578,17 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
       maxLength: config.replyMaxLength,
     });
     await sendFeishuBotTextMessage(config, receiveId, replyText);
+    await updateFeishuBotMessageDedupStatus(config, messageDedupId, 'succeeded', requestId, {
+      message_type: messageType,
+    });
   } catch (error) {
     console.error(`[feishu_bot] request_id=${requestId} handle message failed: ${error.message}`);
+    if (dedupClaimed && messageDedupId) {
+      await updateFeishuBotMessageDedupStatus(config, messageDedupId, 'failed', requestId, {
+        message_type: messageType,
+        error: `${error.message || ''}`.slice(0, 200),
+      });
+    }
     await sendFeishuBotTextMessage(config, receiveId, toFeishuBotFailureText(error)).catch((sendError) => {
       console.error(`[feishu_bot] request_id=${requestId} send failure notice failed: ${sendError.message}`);
     });

@@ -96,6 +96,15 @@ BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/vol
 - `app.qjgroup.top` -> 火山引擎（生产）
 - 不建议把生产主域直接指向 Railway；大陆访问稳定性不可控。
 
+## 研发发布规范（建议团队统一执行）
+- 规范文档：`docs/process/RELEASE_WORKFLOW.md`
+- PR 模板：`.github/pull_request_template.md`
+
+这套规范用于确保：
+- 生产仅发布 `main`，减少误发风险；
+- 新功能先走预发验收，再进入生产；
+- 每次发布都具备可执行回滚点（tag/commit）。
+
 ## 飞书开放平台接入（员工登录）
 当前版本已内置飞书 OAuth 登录入口，支持保护 `/api/analyze` 与 `/api/review`。
 
@@ -188,7 +197,7 @@ BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/vol
 4. Nginx 反向代理
    - 复制模板：`sudo cp deploy/volcengine/nginx.app.qjgroup.top.conf /etc/nginx/conf.d/app.qjgroup.top.conf`
    - 生效配置：`sudo nginx -t && sudo systemctl reload nginx`
-   - 模板已包含 `Host/X-Forwarded-*` 透传和 `client_max_body_size 60m`
+   - 模板已包含 `Host/X-Forwarded-*` 透传和 `client_max_body_size 220m`（后端仍按 `MAX_AUDIO_FILE_SIZE_MB` 校验）
 
 5. 域名与证书
    - 在火山引擎云解析添加 `app.qjgroup.top` 记录

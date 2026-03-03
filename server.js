@@ -381,10 +381,10 @@ const contentTypes = {
 };
 const ALLOWED_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg']);
 const ALLOWED_AUDIO_MIME_PREFIXES = ['audio/', 'application/mp4'];
-const MAX_AUDIO_FILE_SIZE_MB = Number(process.env.MAX_AUDIO_FILE_SIZE_MB || 50);
+const MAX_AUDIO_FILE_SIZE_MB = Number(process.env.MAX_AUDIO_FILE_SIZE_MB || 200);
 const MAX_AUDIO_FILE_SIZE_BYTES = Number.isFinite(MAX_AUDIO_FILE_SIZE_MB)
   ? Math.max(1, MAX_AUDIO_FILE_SIZE_MB) * 1024 * 1024
-  : 50 * 1024 * 1024;
+  : 200 * 1024 * 1024;
 
 function sendJson(res, status, payload) {
   const output =

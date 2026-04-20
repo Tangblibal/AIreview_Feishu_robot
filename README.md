@@ -158,6 +158,34 @@ BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/vol
    - `FEISHU_BOT_REQUIRE_TEXT_WITH_AUDIO=true`：强制先发文字再发录音。
    - `FEISHU_BOT_REPLY_MAX_LENGTH`：控制回复长度，避免超长消息。
 
+## 飞书文档归档（复盘完成后自动创建云文档）
+开启后，机器人会在复盘完成后额外创建一份飞书云文档，并把文档链接回复到原会话里。现有 ASR 和 LLM 处理链路不变，文档创建失败时仍会发送短文本复盘，不会静默失败。
+
+1. 飞书开放平台权限
+   - 群聊信息读取权限：用于读取 `chat_id` 对应群名，生成 `群名-年月日-录音发送人名称` 标题。
+   - 用户信息读取权限：用于根据发送人 ID 解析展示名称。
+   - 云文档创建权限：用于创建新版文档。
+   - 云空间/文件夹写入权限：用于把文档直接创建到指定 folder token 下。
+2. 服务端环境变量
+   - `FEISHU_DOCS_ENABLED=true`
+   - `FEISHU_DOCS_FOLDER_TOKEN=VsF6flLpqlHbUjdlelJcCwMFnEb`
+   - `FEISHU_DOCS_TITLE_TIMEZONE=Asia/Shanghai`
+   - `FEISHU_DOCS_MAX_TITLE_LENGTH=100`
+   - `FEISHU_DOCS_REPLY_MODE=link_with_summary`
+   - `FEISHU_DOCS_REQUEST_TIMEOUT_MS=30000`
+3. folder token 获取与配置
+   - 在飞书云空间中打开目标文件夹，复制链接中的 folder token。
+   - 将该 token 配到 `FEISHU_DOCS_FOLDER_TOKEN`，机器人会把每次复盘的新文档直接建在这个文件夹下。
+4. 文档标题规则
+   - 默认规则：`群名-年月日-录音发送人名称`
+   - 元数据缺失时回退：`录音原文件名-年月日`
+   - 例如：`苏州门店复盘群-20260420-张三`
+   - 例如：`客户首咨录音.m4a-20260420`
+5. 回复行为
+   - 文档创建成功：机器人回复“销售复盘已完成，已归档到飞书文档”，同时附带标题、评分、状态和文档链接。
+   - 文档创建失败：机器人退回短文本复盘，不发送整段 markdown dump；内容只保留完成提示、评分、状态和一句摘要。
+   - 文档功能关闭：继续沿用原有文本回复路径。
+
 ## 中国大陆长期稳定 + 合规部署建议
 若目标是长期服务中国大陆员工，请按以下基线落地：
 

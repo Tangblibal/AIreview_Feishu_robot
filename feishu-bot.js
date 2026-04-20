@@ -1,3 +1,5 @@
+const { createFeishuReviewDocument } = require('./feishu-docs');
+
 function parseFeishuMessageContent(content) {
   if (!content) return {};
   if (typeof content === 'object' && !Array.isArray(content)) return content;
@@ -89,6 +91,112 @@ function formatFeishuBotReply({ report, transcript, textInput, maxLength = 3500 
   return clampMessageLength(lines.join('\n'), maxLength);
 }
 
+function formatFeishuDocReply({ title, url, score, status, maxLength = 1200 }) {
+  const lines = ['销售复盘已完成，已归档到飞书文档。'];
+  if (`${title || ''}`.trim()) {
+    lines.push(`文档标题：${`${title}`.trim()}`);
+  }
+  if (Number.isFinite(score)) {
+    lines.push(`综合评分：${Math.round(score)} 分`);
+  }
+  if (`${status || ''}`.trim()) {
+    lines.push(`状态：${`${status}`.trim()}`);
+  }
+  if (`${url || ''}`.trim()) {
+    lines.push(`文档链接：${`${url}`.trim()}`);
+  }
+  return clampMessageLength(lines.join('\n'), maxLength);
+}
+
+function formatFeishuDocFailureFallback({ report, transcript, textInput, maxLength = 500 }) {
+  const result = report && typeof report === 'object' ? report : {};
+  const lines = ['销售复盘已完成。'];
+  if (Number.isFinite(result.total)) {
+    lines.push(`综合评分：${Math.round(result.total)} 分`);
+  }
+  if (`${result.status || ''}`.trim()) {
+    lines.push(`状态：${`${result.status}`.trim()}`);
+  }
+
+  const summary =
+    extractFeishuFallbackSentence(result.report_markdown) ||
+    extractFeishuFallbackSentence(transcript) ||
+    extractFeishuFallbackSentence(textInput);
+  if (summary) {
+    lines.push(`摘要：${summary}`);
+  }
+
+  return clampMessageLength(lines.join('\n'), maxLength);
+}
+
+function extractFeishuFallbackSentence(value) {
+  const clean = `${value || ''}`
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/^#{1,6}\s+/, '').replace(/^[-*]\s+/, '').replace(/^>\s*/, '').trim())
+    .filter(Boolean)
+    .find((line) => !/^(综合评估|复盘总结|销售复盘)$/i.test(line));
+  if (!clean) return '';
+  return clean.slice(0, 80);
+}
+
+async function buildFeishuReviewReply(
+  { docsConfig = {}, botConfig = {}, token = '', result = {}, textInput = '', context = {}, fetchImpl },
+  injected = {},
+) {
+  const report = result?.report;
+  const transcript = result?.transcript;
+  const maxLength = botConfig.replyMaxLength || 3500;
+
+  if (!(docsConfig.enabled && `${docsConfig.folderToken || ''}`.trim())) {
+    return {
+      mode: 'text',
+      replyText: formatFeishuBotReply({
+        report,
+        transcript,
+        textInput,
+        maxLength,
+      }),
+    };
+  }
+
+  const createDoc = injected.createFeishuReviewDocument || createFeishuReviewDocument;
+  try {
+    const document = await createDoc({
+      docsConfig,
+      botConfig,
+      token,
+      context: {
+        ...context,
+        reportMarkdown: `${report?.report_markdown || ''}`.trim(),
+      },
+      fetchImpl,
+    });
+    return {
+      mode: 'doc_link',
+      replyText: formatFeishuDocReply({
+        title: document.title,
+        url: document.documentUrl,
+        score: report?.total,
+        status: report?.status,
+        maxLength,
+      }),
+      document,
+    };
+  } catch (error) {
+    return {
+      mode: 'text_fallback',
+      replyText: formatFeishuDocFailureFallback({
+        report,
+        transcript,
+        textInput,
+        maxLength,
+      }),
+      error,
+    };
+  }
+}
+
 module.exports = {
   parseFeishuMessageContent,
   extractFeishuTextFromContent,
@@ -96,4 +204,7 @@ module.exports = {
   resolveFeishuResourceType,
   mergeTranscriptWithTextInput,
   formatFeishuBotReply,
+  formatFeishuDocReply,
+  formatFeishuDocFailureFallback,
+  buildFeishuReviewReply,
 };

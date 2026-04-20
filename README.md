@@ -186,6 +186,32 @@ BASE_URL=https://<service>.up.railway.app AUDIO_FILE=/path/demo.m4a ./deploy/vol
    - 文档创建失败：机器人退回短文本复盘，不发送整段 markdown dump；内容只保留完成提示、评分、状态和一句摘要。
    - 文档功能关闭：继续沿用原有文本回复路径。
 
+## 一次性授权文件夹给应用（显式协作者方案）
+如果 `FEISHU_DOCS_FOLDER_TOKEN` 对应的文件夹没有显式授权给应用，机器人在创建文档时会收到 `1770040 no folder permission`，随后回退到短文本回复。此时可以使用仓库内脚本做一次性授权。
+
+执行前你需要准备：
+- 拥有目标文件夹管理权限的飞书用户 `user_access_token`
+- 目标文件夹的 `folder token`
+- 当前应用的 `open_id`
+
+执行命令：
+
+```bash
+node scripts/grant-feishu-folder-access.js \
+  --folder-token fldcnxxxxxxxx \
+  --user-access-token u-xxxxxxxx \
+  --app-open-id ou_xxxxxxxx
+```
+
+可选参数：
+- `--member-type openid`：默认值就是 `openid`
+- `--perm edit`：默认值就是 `edit`
+- `--base-url https://open.feishu.cn`
+- `--timeout-ms 30000`
+- `--need-notification true|false`
+
+脚本成功时会打印飞书返回结果；失败时会原样打印错误体，便于对照飞书开放平台日志排查。
+
 ## 中国大陆长期稳定 + 合规部署建议
 若目标是长期服务中国大陆员工，请按以下基线落地：
 

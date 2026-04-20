@@ -14,7 +14,10 @@ const {
   resolveFeishuResourceType,
   mergeTranscriptWithTextInput,
   formatFeishuBotReply,
+  formatFeishuDocFailureFallback,
+  buildFeishuReviewReply,
 } = require('./feishu-bot');
+const { getFeishuDocsConfig } = require('./feishu-docs');
 const {
   buildFeishuMessageDedupKey,
   claimInMemoryMessageDedup,
@@ -1571,13 +1574,57 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
         data_base64: downloaded.data.toString('base64'),
       },
     });
-    const replyText = formatFeishuBotReply({
-      report: result.report,
-      transcript: result.transcript,
-      textInput,
-      maxLength: config.replyMaxLength,
-    });
-    await sendFeishuBotTextMessage(config, receiveId, replyText);
+    const docsConfig = getFeishuDocsConfig(readEnvString, readEnvBoolean, readEnvNumber);
+    let replyPayload;
+    if (docsConfig.enabled && docsConfig.folderToken) {
+      try {
+        const token = await getFeishuBotTenantAccessToken(config);
+        replyPayload = await buildFeishuReviewReply({
+          docsConfig,
+          botConfig: config,
+          token,
+          result,
+          textInput,
+          context: {
+            chatId: `${message.chat_id || ''}`.trim(),
+            senderId: resolveFeishuSenderId(event),
+            audioFileName: downloaded.filename,
+            now: new Date(),
+          },
+          fetchImpl: fetchWithTimeout,
+        });
+      } catch (docError) {
+        console.error(`[feishu_docs] request_id=${requestId} document flow failed: ${docError.message}`);
+        replyPayload = {
+          mode: 'text_fallback',
+          replyText: formatFeishuDocFailureFallback({
+            report: result.report,
+            transcript: result.transcript,
+            textInput,
+            maxLength: config.replyMaxLength,
+          }),
+          error: docError,
+        };
+      }
+    } else {
+      replyPayload = await buildFeishuReviewReply({
+        docsConfig,
+        botConfig: config,
+        result,
+        textInput,
+      });
+    }
+    if (replyPayload?.mode === 'doc_link' && replyPayload.document) {
+      console.log(
+        `[feishu_docs] request_id=${requestId} document created title=${JSON.stringify(
+          replyPayload.document.title,
+        )} fallback_used=${Boolean(replyPayload.document.fallbackUsed)} url=${replyPayload.document.documentUrl}`,
+      );
+    }
+    if (replyPayload?.mode === 'text_fallback' && replyPayload.error) {
+      console.error(`[feishu_docs] request_id=${requestId} fallback to text reply: ${replyPayload.error.message}`);
+    }
+    await sendFeishuBotTextMessage(config, receiveId, replyPayload.replyText);
     await updateFeishuBotMessageDedupStatus(config, messageDedupId, 'succeeded', requestId, {
       message_type: messageType,
     });

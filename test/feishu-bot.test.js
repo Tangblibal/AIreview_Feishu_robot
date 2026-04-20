@@ -10,6 +10,7 @@ const {
   formatFeishuBotReply,
   formatFeishuDocReply,
   formatFeishuDocFailureFallback,
+  buildFeishuReviewReply,
 } = require('../feishu-bot');
 
 test('parseFeishuMessageContent parses valid JSON string', () => {
@@ -105,4 +106,125 @@ test('formatFeishuDocFailureFallback keeps reply short and uses report summary f
   assert.match(text, /状态：完成/);
   assert.match(text, /整体跟进节奏稳定/);
   assert.ok(text.length <= 120);
+});
+
+test('buildFeishuReviewReply uses document link reply when docs are enabled and creation succeeds', async () => {
+  const reply = await buildFeishuReviewReply(
+    {
+      docsConfig: {
+        enabled: true,
+        folderToken: 'folder_x',
+        timezone: 'Asia/Shanghai',
+        maxTitleLength: 100,
+      },
+      botConfig: {
+        replyMaxLength: 400,
+        requestTimeoutMs: 20000,
+      },
+      token: 'tenant_x',
+      result: {
+        report: {
+          total: 88,
+          status: '完成',
+          report_markdown: '## 综合评估\n整体转化把控较稳。',
+        },
+        transcript: '销售: 介绍套餐',
+      },
+      textInput: '客户预算 8k',
+      context: {
+        chatId: 'oc_chat',
+        senderId: 'ou_sender',
+        audioFileName: '试听.m4a',
+        now: new Date('2026-04-20T09:10:11+08:00'),
+      },
+    },
+    {
+      createFeishuReviewDocument: async () => ({
+        title: '苏州门店复盘群-20260420-张三',
+        documentToken: 'doc_x',
+        documentUrl: 'https://feishu.cn/docx/doc_x',
+      }),
+    },
+  );
+
+  assert.equal(reply.mode, 'doc_link');
+  assert.match(reply.replyText, /https:\/\/feishu\.cn\/docx\/doc_x/);
+  assert.equal(reply.document.title, '苏州门店复盘群-20260420-张三');
+});
+
+test('buildFeishuReviewReply falls back to short text when document creation fails', async () => {
+  const reply = await buildFeishuReviewReply(
+    {
+      docsConfig: {
+        enabled: true,
+        folderToken: 'folder_x',
+        timezone: 'Asia/Shanghai',
+        maxTitleLength: 100,
+      },
+      botConfig: {
+        replyMaxLength: 200,
+        requestTimeoutMs: 20000,
+      },
+      token: 'tenant_x',
+      result: {
+        report: {
+          total: 92,
+          status: '完成',
+          report_markdown: '## 综合评估\n整体沟通比较顺畅，报价阶段需要更早收口。',
+        },
+        transcript: '销售: 介绍套餐',
+      },
+      textInput: '老客转介绍',
+      context: {
+        chatId: 'oc_chat',
+        senderId: 'ou_sender',
+        audioFileName: '试听.m4a',
+        now: new Date('2026-04-20T09:10:11+08:00'),
+      },
+    },
+    {
+      createFeishuReviewDocument: async () => {
+        throw new Error('folder not found');
+      },
+    },
+  );
+
+  assert.equal(reply.mode, 'text_fallback');
+  assert.match(reply.replyText, /销售复盘已完成。/);
+  assert.match(reply.replyText, /综合评分：92 分/);
+  assert.match(reply.replyText, /整体沟通比较顺畅/);
+  assert.match(reply.error.message, /folder not found/);
+});
+
+test('buildFeishuReviewReply keeps existing text reply when docs are disabled', async () => {
+  const reply = await buildFeishuReviewReply({
+    docsConfig: {
+      enabled: false,
+      folderToken: '',
+    },
+    botConfig: {
+      replyMaxLength: 220,
+      requestTimeoutMs: 20000,
+    },
+    token: 'tenant_x',
+    result: {
+      report: {
+        total: 86,
+        status: '完成',
+        report_markdown: '## 综合评估\n原有文本回复路径。',
+      },
+      transcript: '销售: 介绍套餐',
+    },
+    textInput: '客户预算 6k',
+    context: {
+      chatId: 'oc_chat',
+      senderId: 'ou_sender',
+      audioFileName: '试听.m4a',
+      now: new Date('2026-04-20T09:10:11+08:00'),
+    },
+  });
+
+  assert.equal(reply.mode, 'text');
+  assert.match(reply.replyText, /销售复盘已完成。/);
+  assert.match(reply.replyText, /原有文本回复路径/);
 });

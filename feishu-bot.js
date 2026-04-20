@@ -1,3 +1,5 @@
+const { createFeishuReviewDocument } = require('./feishu-docs');
+
 function parseFeishuMessageContent(content) {
   if (!content) return {};
   if (typeof content === 'object' && !Array.isArray(content)) return content;
@@ -138,6 +140,63 @@ function extractFeishuFallbackSentence(value) {
   return clean.slice(0, 80);
 }
 
+async function buildFeishuReviewReply(
+  { docsConfig = {}, botConfig = {}, token = '', result = {}, textInput = '', context = {}, fetchImpl },
+  injected = {},
+) {
+  const report = result?.report;
+  const transcript = result?.transcript;
+  const maxLength = botConfig.replyMaxLength || 3500;
+
+  if (!(docsConfig.enabled && `${docsConfig.folderToken || ''}`.trim())) {
+    return {
+      mode: 'text',
+      replyText: formatFeishuBotReply({
+        report,
+        transcript,
+        textInput,
+        maxLength,
+      }),
+    };
+  }
+
+  const createDoc = injected.createFeishuReviewDocument || createFeishuReviewDocument;
+  try {
+    const document = await createDoc({
+      docsConfig,
+      botConfig,
+      token,
+      context: {
+        ...context,
+        reportMarkdown: `${report?.report_markdown || ''}`.trim(),
+      },
+      fetchImpl,
+    });
+    return {
+      mode: 'doc_link',
+      replyText: formatFeishuDocReply({
+        title: document.title,
+        url: document.documentUrl,
+        score: report?.total,
+        status: report?.status,
+        maxLength,
+      }),
+      document,
+    };
+  } catch (error) {
+    return {
+      mode: 'text_fallback',
+      replyText: formatFeishuDocFailureFallback({
+        report,
+        transcript,
+        textInput,
+        maxLength,
+      }),
+      error,
+    };
+  }
+}
+
 module.exports = {
   parseFeishuMessageContent,
   extractFeishuTextFromContent,
@@ -147,4 +206,5 @@ module.exports = {
   formatFeishuBotReply,
   formatFeishuDocReply,
   formatFeishuDocFailureFallback,
+  buildFeishuReviewReply,
 };

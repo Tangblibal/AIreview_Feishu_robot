@@ -32,6 +32,140 @@ function convertMarkdownToFeishuDocBlocks(markdown) {
   return splitIntoSimpleBlocks(markdown).map(toFeishuBlock);
 }
 
+async function resolveFeishuChatName({ token, chatId, fetchImpl, timeoutMs }) {
+  if (!token || !chatId) return '';
+  try {
+    const payload = await callFeishuJsonApi({
+      url: `https://open.feishu.cn/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`,
+      token,
+      fetchImpl,
+      timeoutMs,
+      errorLabel: 'Feishu chat lookup',
+    });
+    return `${payload?.data?.name || payload?.data?.chat?.name || ''}`.trim();
+  } catch (error) {
+    return '';
+  }
+}
+
+async function resolveFeishuSenderDisplayName({ token, senderId, fetchImpl, timeoutMs }) {
+  if (!token || !senderId) return '';
+  const userIdTypes = ['open_id', 'user_id', 'union_id'];
+  for (const userIdType of userIdTypes) {
+    try {
+      const url = new URL(`https://open.feishu.cn/open-apis/contact/v3/users/${encodeURIComponent(senderId)}`);
+      url.searchParams.set('user_id_type', userIdType);
+      const payload = await callFeishuJsonApi({
+        url: url.toString(),
+        token,
+        fetchImpl,
+        timeoutMs,
+        errorLabel: 'Feishu user lookup',
+      });
+      const name = `${payload?.data?.user?.name || payload?.data?.user?.display_name || ''}`.trim();
+      if (name) return name;
+    } catch (error) {
+      // Continue trying alternate user id types.
+    }
+  }
+  return '';
+}
+
+async function createDocumentInFolder({ token, folderToken, title, fetchImpl, timeoutMs }) {
+  const payload = await callFeishuJsonApi({
+    url: 'https://open.feishu.cn/open-apis/docx/v1/documents',
+    token,
+    fetchImpl,
+    timeoutMs,
+    method: 'POST',
+    body: {
+      folder_token: folderToken,
+      title,
+    },
+    errorLabel: 'Feishu document creation',
+  });
+  const documentToken = `${payload?.data?.document?.document_id || payload?.data?.document_id || ''}`.trim();
+  if (!documentToken) {
+    throw new Error('Feishu document creation succeeded but did not return a document token.');
+  }
+  return {
+    documentToken,
+    documentUrl:
+      `${payload?.data?.url || payload?.data?.document?.url || payload?.data?.document_url || ''}`.trim() ||
+      `https://feishu.cn/docx/${documentToken}`,
+  };
+}
+
+async function appendBlocksToDocument({ token, documentToken, blocks, fetchImpl, timeoutMs }) {
+  const children = normalizeFeishuBlockPayload(blocks);
+  if (!children.length) return;
+  await callFeishuJsonApi({
+    url: `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentToken)}/blocks/${encodeURIComponent(
+      documentToken,
+    )}/children`,
+    token,
+    fetchImpl,
+    timeoutMs,
+    method: 'POST',
+    body: {
+      index: 0,
+      children,
+    },
+    errorLabel: 'Feishu document append',
+  });
+}
+
+async function createFeishuReviewDocument(options, injectedHelpers = {}) {
+  const { docsConfig = {}, botConfig = {}, token = '', context = {}, fetchImpl } = options || {};
+  const timeoutMs = docsConfig.requestTimeoutMs || botConfig.requestTimeoutMs || 30000;
+  const helpers = {
+    resolveChatName: injectedHelpers.resolveChatName || resolveFeishuChatName,
+    resolveSenderDisplayName: injectedHelpers.resolveSenderDisplayName || resolveFeishuSenderDisplayName,
+    createDocumentInFolder: injectedHelpers.createDocumentInFolder || createDocumentInFolder,
+    appendBlocksToDocument: injectedHelpers.appendBlocksToDocument || appendBlocksToDocument,
+  };
+
+  const [chatName, senderDisplayName] = await Promise.all([
+    helpers
+      .resolveChatName({ token, chatId: context.chatId, fetchImpl, timeoutMs })
+      .catch(() => ''),
+    helpers
+      .resolveSenderDisplayName({ token, senderId: context.senderId, fetchImpl, timeoutMs })
+      .catch(() => ''),
+  ]);
+
+  const title = buildFeishuReviewDocumentTitle({
+    chatName,
+    senderDisplayName,
+    audioFileName: context.audioFileName,
+    now: context.now,
+    timezone: docsConfig.timezone,
+    maxTitleLength: docsConfig.maxTitleLength,
+  });
+  const blocks = convertMarkdownToFeishuDocBlocks(context.reportMarkdown || '');
+  const document = await helpers.createDocumentInFolder({
+    token,
+    folderToken: docsConfig.folderToken,
+    title,
+    fetchImpl,
+    timeoutMs,
+  });
+  await helpers.appendBlocksToDocument({
+    token,
+    documentToken: document.documentToken,
+    blocks: blocks.length ? blocks : [{ type: 'paragraph', text: '销售复盘已完成。' }],
+    fetchImpl,
+    timeoutMs,
+  });
+
+  return {
+    title,
+    documentToken: document.documentToken,
+    documentUrl: document.documentUrl,
+    fallbackUsed: !(chatName && senderDisplayName),
+  };
+}
+
 function formatDateYYYYMMDD(date, timezone = 'Asia/Shanghai') {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
@@ -90,8 +224,85 @@ function toFeishuBlock(block) {
   };
 }
 
+function normalizeFeishuBlockPayload(blocks) {
+  return (Array.isArray(blocks) ? blocks : [])
+    .map((block) => toFeishuApiBlock(block))
+    .filter(Boolean);
+}
+
+function toFeishuApiBlock(block) {
+  const type = `${block?.type || ''}`.trim() || 'paragraph';
+  const text = `${block?.text || ''}`.trim();
+  const blockTypeByName = {
+    paragraph: 2,
+    text: 2,
+    heading1: 3,
+    heading2: 4,
+    heading3: 5,
+    heading4: 6,
+    heading5: 7,
+    heading6: 8,
+    bullet: 12,
+    quote: 15,
+  };
+  const propertyByName = {
+    paragraph: 'text',
+    text: 'text',
+    heading1: 'heading1',
+    heading2: 'heading2',
+    heading3: 'heading3',
+    heading4: 'heading4',
+    heading5: 'heading5',
+    heading6: 'heading6',
+    bullet: 'bullet',
+    quote: 'quote',
+  };
+  const blockType = blockTypeByName[type];
+  const property = propertyByName[type];
+  if (!blockType || !property || !text) return null;
+  return {
+    block_type: blockType,
+    [property]: {
+      elements: [
+        {
+          text_run: {
+            content: text,
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function callFeishuJsonApi({ url, token, fetchImpl, timeoutMs, method = 'GET', body, errorLabel }) {
+  const response = await fetchImpl(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }, timeoutMs);
+
+  if (!response?.ok) {
+    const text = await response?.text?.().catch(() => '');
+    throw new Error(`${errorLabel} failed: ${response?.status || 'unknown'} ${text}`.trim());
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (payload?.code && payload.code !== 0) {
+    throw new Error(`${errorLabel} failed: ${payload.msg || payload.code}`);
+  }
+  return payload;
+}
+
 module.exports = {
   getFeishuDocsConfig,
   buildFeishuReviewDocumentTitle,
   convertMarkdownToFeishuDocBlocks,
+  resolveFeishuChatName,
+  resolveFeishuSenderDisplayName,
+  createDocumentInFolder,
+  appendBlocksToDocument,
+  createFeishuReviewDocument,
 };

@@ -113,7 +113,6 @@ test('buildFeishuReviewReply uses document link reply when docs are enabled and 
     {
       docsConfig: {
         enabled: true,
-        folderToken: 'folder_x',
         timezone: 'Asia/Shanghai',
         maxTitleLength: 100,
       },
@@ -157,7 +156,6 @@ test('buildFeishuReviewReply falls back to short text when document creation fai
     {
       docsConfig: {
         enabled: true,
-        folderToken: 'folder_x',
         timezone: 'Asia/Shanghai',
         maxTitleLength: 100,
       },

@@ -71,17 +71,14 @@ async function resolveFeishuSenderDisplayName({ token, senderId, fetchImpl, time
   return '';
 }
 
-async function createDocumentInFolder({ token, folderToken, title, fetchImpl, timeoutMs }) {
+async function createDocumentDirectly({ token, title, fetchImpl, timeoutMs }) {
   const payload = await callFeishuJsonApi({
     url: 'https://open.feishu.cn/open-apis/docx/v1/documents',
     token,
     fetchImpl,
     timeoutMs,
     method: 'POST',
-    body: {
-      folder_token: folderToken,
-      title,
-    },
+    body: { title },
     errorLabel: 'Feishu document creation',
   });
   const documentToken = `${payload?.data?.document?.document_id || payload?.data?.document_id || ''}`.trim();
@@ -121,7 +118,10 @@ async function createFeishuReviewDocument(options, injectedHelpers = {}) {
   const helpers = {
     resolveChatName: injectedHelpers.resolveChatName || resolveFeishuChatName,
     resolveSenderDisplayName: injectedHelpers.resolveSenderDisplayName || resolveFeishuSenderDisplayName,
-    createDocumentInFolder: injectedHelpers.createDocumentInFolder || createDocumentInFolder,
+    createDocumentDirectly:
+      injectedHelpers.createDocumentDirectly ||
+      injectedHelpers.createDocumentInFolder ||
+      createDocumentDirectly,
     appendBlocksToDocument: injectedHelpers.appendBlocksToDocument || appendBlocksToDocument,
   };
 
@@ -143,9 +143,8 @@ async function createFeishuReviewDocument(options, injectedHelpers = {}) {
     maxTitleLength: docsConfig.maxTitleLength,
   });
   const blocks = convertMarkdownToFeishuDocBlocks(context.reportMarkdown || '');
-  const document = await helpers.createDocumentInFolder({
+  const document = await helpers.createDocumentDirectly({
     token,
-    folderToken: docsConfig.folderToken,
     title,
     fetchImpl,
     timeoutMs,
@@ -302,7 +301,7 @@ module.exports = {
   convertMarkdownToFeishuDocBlocks,
   resolveFeishuChatName,
   resolveFeishuSenderDisplayName,
-  createDocumentInFolder,
+  createDocumentDirectly,
   appendBlocksToDocument,
   createFeishuReviewDocument,
 };

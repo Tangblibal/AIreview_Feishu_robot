@@ -148,7 +148,7 @@ async function buildFeishuReviewReply(
   const transcript = result?.transcript;
   const maxLength = botConfig.replyMaxLength || 3500;
 
-  if (!(docsConfig.enabled && `${docsConfig.folderToken || ''}`.trim())) {
+  if (!docsConfig.enabled) {
     return {
       mode: 'text',
       replyText: formatFeishuBotReply({

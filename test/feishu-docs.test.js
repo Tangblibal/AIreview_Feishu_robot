@@ -39,9 +39,10 @@ test('convertMarkdownToFeishuDocBlocks maps heading, paragraph, list, and quote'
 
 test('createFeishuReviewDocument uses chat and sender metadata when available', async () => {
   let appendedBlocks = null;
+  let createArgs = null;
   const result = await createFeishuReviewDocument(
     {
-      docsConfig: { enabled: true, folderToken: 'folder_x', timezone: 'Asia/Shanghai', maxTitleLength: 100 },
+      docsConfig: { enabled: true, timezone: 'Asia/Shanghai', maxTitleLength: 100 },
       botConfig: { requestTimeoutMs: 20000 },
       context: {
         chatId: 'oc_chat',
@@ -54,10 +55,13 @@ test('createFeishuReviewDocument uses chat and sender metadata when available', 
     {
       resolveChatName: async () => '苏州门店复盘群',
       resolveSenderDisplayName: async () => '张三',
-      createDocumentInFolder: async ({ title }) => ({
-        documentToken: 'doc_x',
-        documentUrl: `https://example.com/doc/${encodeURIComponent(title)}`,
-      }),
+      createDocumentDirectly: async (args) => {
+        createArgs = args;
+        return {
+          documentToken: 'doc_x',
+          documentUrl: `https://example.com/doc/${encodeURIComponent(args.title)}`,
+        };
+      },
       appendBlocksToDocument: async ({ blocks }) => {
         appendedBlocks = blocks;
       },
@@ -69,12 +73,14 @@ test('createFeishuReviewDocument uses chat and sender metadata when available', 
   assert.equal(result.documentUrl, 'https://example.com/doc/%E8%8B%8F%E5%B7%9E%E9%97%A8%E5%BA%97%E5%A4%8D%E7%9B%98%E7%BE%A4-20260420-%E5%BC%A0%E4%B8%89');
   assert.equal(result.fallbackUsed, false);
   assert.equal(appendedBlocks[0].type, 'heading2');
+  assert.equal(createArgs.folderToken, undefined);
+  assert.equal(createArgs.title, '苏州门店复盘群-20260420-张三');
 });
 
 test('createFeishuReviewDocument falls back to audio filename when chat metadata is unavailable', async () => {
   const result = await createFeishuReviewDocument(
     {
-      docsConfig: { enabled: true, folderToken: 'folder_x', timezone: 'Asia/Shanghai', maxTitleLength: 100 },
+      docsConfig: { enabled: true, timezone: 'Asia/Shanghai', maxTitleLength: 100 },
       botConfig: { requestTimeoutMs: 20000 },
       context: {
         chatId: 'oc_chat',
@@ -87,7 +93,7 @@ test('createFeishuReviewDocument falls back to audio filename when chat metadata
     {
       resolveChatName: async () => '',
       resolveSenderDisplayName: async () => '',
-      createDocumentInFolder: async ({ title }) => ({
+      createDocumentDirectly: async ({ title }) => ({
         documentToken: 'doc_y',
         documentUrl: `https://example.com/doc/${encodeURIComponent(title)}`,
       }),

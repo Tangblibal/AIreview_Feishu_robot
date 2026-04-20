@@ -8,6 +8,8 @@ const {
   resolveFeishuResourceType,
   mergeTranscriptWithTextInput,
   formatFeishuBotReply,
+  formatFeishuDocReply,
+  formatFeishuDocFailureFallback,
 } = require('../feishu-bot');
 
 test('parseFeishuMessageContent parses valid JSON string', () => {
@@ -70,4 +72,37 @@ test('formatFeishuBotReply formats scores and truncates safely', () => {
   assert.match(message, /综合评分：88 分/);
   assert.match(message, /补充文字：客户偏韩式清透风/);
   assert.ok(message.length <= 400);
+});
+
+test('formatFeishuDocReply includes title, score, and document url', () => {
+  const text = formatFeishuDocReply({
+    title: '苏州门店复盘群-20260420-张三',
+    url: 'https://acnujre61sh3.feishu.cn/docx/abc',
+    score: 88,
+    status: '完成',
+  });
+
+  assert.match(text, /销售复盘已完成/);
+  assert.match(text, /苏州门店复盘群-20260420-张三/);
+  assert.match(text, /88/);
+  assert.match(text, /https:\/\/acnujre61sh3\.feishu\.cn\/docx\/abc/);
+});
+
+test('formatFeishuDocFailureFallback keeps reply short and uses report summary first', () => {
+  const text = formatFeishuDocFailureFallback({
+    report: {
+      total: 91,
+      status: '完成',
+      report_markdown: '## 综合评估\n整体跟进节奏稳定，客户对套餐价格敏感。',
+    },
+    transcript: '销售: 介绍套餐\n客户: 价格有点高',
+    textInput: '客户是老客转介绍',
+    maxLength: 120,
+  });
+
+  assert.match(text, /销售复盘已完成。/);
+  assert.match(text, /综合评分：91 分/);
+  assert.match(text, /状态：完成/);
+  assert.match(text, /整体跟进节奏稳定/);
+  assert.ok(text.length <= 120);
 });

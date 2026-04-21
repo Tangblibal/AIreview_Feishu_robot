@@ -278,7 +278,8 @@ const DEFAULT_CONFIG = {
       type: 'anthropic',
       base_url: 'https://ai.comfly.chat/v1',
       api_key: '',
-      model: 'claude-3-5-sonnet-20240620',
+      model: 'claude-opus-4-6',
+      max_tokens: 128000,
       auth_header: 'Authorization',
       auth_prefix: 'Bearer ',
       timeout_ms: 600000,
@@ -932,6 +933,7 @@ function applyProviderEnv(config, providerName, prefix) {
   assignIfDefined(provider, 'base_url', readEnvString(`${prefix}_BASE_URL`));
   assignIfDefined(provider, 'api_key', readEnvString(`${prefix}_API_KEY`, { allowEmpty: true }));
   assignIfDefined(provider, 'model', readEnvString(`${prefix}_MODEL`));
+  assignIfDefined(provider, 'max_tokens', readEnvNumber(`${prefix}_MAX_TOKENS`));
   assignIfDefined(provider, 'auth_header', readEnvString(`${prefix}_AUTH_HEADER`));
   assignIfDefined(provider, 'auth_prefix', readEnvString(`${prefix}_AUTH_PREFIX`, { allowEmpty: true }));
   assignIfDefined(provider, 'timeout_ms', readEnvNumber(`${prefix}_TIMEOUT_MS`));
@@ -2129,8 +2131,8 @@ async function callAnthropic({ provider, prompt }) {
   const baseUrl = provider.base_url || 'https://ai.comfly.chat/v1';
   const url = `${baseUrl.replace(/\/$/, '')}/messages`;
   const payload = {
-    model: provider.model || 'claude-3-5-sonnet-20240620',
-    max_tokens: 900,
+    model: provider.model || 'claude-opus-4-6',
+    max_tokens: provider.max_tokens || 128000,
     system: '你是销售复盘专家，请严格输出 JSON。',
     messages: [{ role: 'user', content: prompt }],
   };

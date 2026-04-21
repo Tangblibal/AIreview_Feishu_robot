@@ -14,7 +14,7 @@ test('Anthropic defaults target Claude Opus 4.6 with configurable max output tok
   assert.match(serverJs, /model:\s*'claude-opus-4-6'/);
   assert.match(serverJs, /assignIfDefined\(provider,\s*'max_tokens',\s*readEnvNumber\(`\$\{prefix\}_MAX_TOKENS`\)\)/);
   assert.match(serverJs, /model:\s*provider\.model\s*\|\|\s*'claude-opus-4-6'/);
-  assert.match(serverJs, /max_tokens:\s*provider\.max_tokens\s*\|\|\s*128000/);
+  assert.match(serverJs, /max_tokens:\s*provider\.max_tokens\s*\|\|\s*64000/);
 });
 
 test('Review pipeline now treats model output as markdown instead of strict JSON', () => {
@@ -32,11 +32,11 @@ test('Feishu docs flow no longer depends on folder token gate in server handler'
   assert.doesNotMatch(serverJs, /docsConfig\.enabled && docsConfig\.folderToken/);
 });
 
-test('Anthropic defaults include upstream retry controls for 524 and similar gateway failures', () => {
+test('Anthropic defaults keep a single-pass request budget and minimal retry settings', () => {
   const serverJs = read('server.js');
   const envExample = read('.env.example');
 
-  assert.match(serverJs, /retry_attempts:\s*2/);
+  assert.match(serverJs, /retry_attempts:\s*1/);
   assert.match(serverJs, /retry_backoff_ms:\s*3000/);
   assert.match(serverJs, /retry_reduced_max_tokens:\s*32768/);
   assert.match(serverJs, /assignIfDefined\(provider,\s*'retry_attempts',\s*readEnvNumber\(`\$\{prefix\}_RETRY_ATTEMPTS`\)\)/);
@@ -47,25 +47,27 @@ test('Anthropic defaults include upstream retry controls for 524 and similar gat
   );
   assert.match(serverJs, /function shouldRetryForUpstreamError\(error\)/);
   assert.match(serverJs, /message\.includes\('524'\)/);
-  assert.match(serverJs, /Math\.min\(provider\.max_tokens \|\| 128000,\s*provider\.retry_reduced_max_tokens \|\| 32768\)/);
+  assert.match(serverJs, /Math\.min\(provider\.max_tokens \|\| 64000,\s*provider\.retry_reduced_max_tokens \|\| 32768\)/);
 
-  assert.match(envExample, /^ANTHROPIC_RETRY_ATTEMPTS=2$/m);
+  assert.match(envExample, /^ANTHROPIC_RETRY_ATTEMPTS=1$/m);
   assert.match(envExample, /^ANTHROPIC_RETRY_BACKOFF_MS=3000$/m);
   assert.match(envExample, /^ANTHROPIC_RETRY_REDUCED_MAX_TOKENS=32768$/m);
 });
 
-test('Anthropic requests use streaming responses to avoid gateway idle timeout', () => {
+test('Anthropic requests stay single-pass and log explicit token cutoffs', () => {
   const serverJs = read('server.js');
   assert.match(serverJs, /const \{ readAnthropicMessageStream \} = require\('\.\/anthropic-stream'\);/);
   assert.match(serverJs, /stream:\s*true/);
-  assert.match(serverJs, /return readAnthropicMessageStream\(response\.body\);/);
-  assert.match(serverJs, /if \(result\?\.stopReason !== 'max_tokens'\) \{/);
-  assert.match(serverJs, /请从刚才中断的位置继续输出剩余 Markdown 正文/);
+  assert.match(serverJs, /const result = await readAnthropicMessageStream\(response\.body\);/);
+  assert.match(serverJs, /if \(result\?\.stopReason === 'max_tokens'\) \{/);
+  assert.match(serverJs, /\[anthropic\] stop_reason=max_tokens/);
+  assert.doesNotMatch(serverJs, /请从刚才中断的位置继续输出剩余 Markdown 正文/);
 });
 
-test('Checked-in AI config defaults to Claude Opus 4.6 with 128000 max output tokens', () => {
+test('Checked-in AI config defaults to Claude Opus 4.6 with 64000 max output tokens', () => {
   const configText = read('config/ai.config.json');
   const config = JSON.parse(configText);
   assert.equal(config.providers.anthropic.model, 'claude-opus-4-6');
-  assert.equal(config.providers.anthropic.max_tokens, 128000);
+  assert.equal(config.providers.anthropic.max_tokens, 64000);
+  assert.equal(config.providers.anthropic.retry_attempts, 1);
 });

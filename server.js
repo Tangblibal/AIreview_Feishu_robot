@@ -280,8 +280,8 @@ const DEFAULT_CONFIG = {
       base_url: 'https://ai.comfly.chat/v1',
       api_key: '',
       model: 'claude-opus-4-6',
-      max_tokens: 128000,
-      retry_attempts: 2,
+      max_tokens: 64000,
+      retry_attempts: 1,
       retry_backoff_ms: 3000,
       retry_reduced_max_tokens: 32768,
       auth_header: 'Authorization',
@@ -2093,7 +2093,7 @@ function buildRetryProvider(provider, attempt) {
   }
   return {
     ...provider,
-    max_tokens: Math.min(provider.max_tokens || 128000, provider.retry_reduced_max_tokens || 32768),
+    max_tokens: Math.min(provider.max_tokens || 64000, provider.retry_reduced_max_tokens || 32768),
   };
 }
 
@@ -2153,7 +2153,7 @@ async function callAnthropic({ provider, prompt }) {
   const sendAnthropicRequest = async (messages) => {
     const payload = {
       model: provider.model || 'claude-opus-4-6',
-      max_tokens: provider.max_tokens || 128000,
+      max_tokens: provider.max_tokens || 64000,
       stream: true,
       system: '你是销售复盘专家，请直接输出完整 Markdown 复盘正文，不要 JSON，不要额外解释。',
       messages,
@@ -2174,29 +2174,22 @@ async function callAnthropic({ provider, prompt }) {
       throw new Error(`Anthropic API error: ${response.status} ${errorText}`.trim());
     }
 
-    return readAnthropicMessageStream(response.body);
+    const result = await readAnthropicMessageStream(response.body);
+    if (result?.stopReason === 'max_tokens') {
+      console.warn(
+        `[anthropic] stop_reason=max_tokens model=${payload.model} max_tokens=${payload.max_tokens} base_url=${baseUrl}`,
+      );
+    }
+    return result;
   };
 
   const messages = [{ role: 'user', content: prompt }];
-  const continuationPrompt = '请从刚才中断的位置继续输出剩余 Markdown 正文，不要重复已经输出过的内容，不要重写开头。';
-  const maxContinuationRounds = Math.max(1, provider.continuation_rounds || 4);
-  let combinedText = '';
-
-  for (let round = 0; round < maxContinuationRounds; round += 1) {
-    const result = await sendAnthropicRequest(messages);
-    const chunkText = `${result?.text || ''}`;
-    combinedText += chunkText;
-    if (!combinedText.trim()) {
-      throw new Error('Anthropic API response missing content');
-    }
-    if (result?.stopReason !== 'max_tokens') {
-      break;
-    }
-    messages.push({ role: 'assistant', content: chunkText });
-    messages.push({ role: 'user', content: continuationPrompt });
+  const result = await sendAnthropicRequest(messages);
+  const text = `${result?.text || ''}`.trim();
+  if (!text) {
+    throw new Error('Anthropic API response missing content');
   }
-
-  return combinedText.trim();
+  return text;
 }
 
 async function callModelWithRetry({ provider, prompt }) {
@@ -2215,7 +2208,7 @@ async function callModelWithRetry({ provider, prompt }) {
     }
     if (!shouldRetryForUpstreamError(error)) throw error;
 
-    const retryAttempts = Math.max(1, provider.retry_attempts || 2);
+    const retryAttempts = Math.max(1, provider.retry_attempts || 1);
     const retryBackoffMs = Math.max(0, provider.retry_backoff_ms || 3000);
     let lastError = error;
 

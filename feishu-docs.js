@@ -96,20 +96,24 @@ async function createDocumentDirectly({ token, title, fetchImpl, timeoutMs }) {
 async function appendBlocksToDocument({ token, documentToken, blocks, fetchImpl, timeoutMs }) {
   const children = normalizeFeishuBlockPayload(blocks);
   if (!children.length) return;
-  await callFeishuJsonApi({
-    url: `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentToken)}/blocks/${encodeURIComponent(
-      documentToken,
-    )}/children`,
-    token,
-    fetchImpl,
-    timeoutMs,
-    method: 'POST',
-    body: {
-      index: 0,
-      children,
-    },
-    errorLabel: 'Feishu document append',
-  });
+  const batches = splitIntoChunks(children, 50);
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index];
+    await callFeishuJsonApi({
+      url: `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentToken)}/blocks/${encodeURIComponent(
+        documentToken,
+      )}/children`,
+      token,
+      fetchImpl,
+      timeoutMs,
+      method: 'POST',
+      body: {
+        index: index * 50,
+        children: batch,
+      },
+      errorLabel: 'Feishu document append',
+    });
+  }
 }
 
 async function createFeishuReviewDocument(options, injectedHelpers = {}) {
@@ -227,6 +231,14 @@ function normalizeFeishuBlockPayload(blocks) {
   return (Array.isArray(blocks) ? blocks : [])
     .map((block) => toFeishuApiBlock(block))
     .filter(Boolean);
+}
+
+function splitIntoChunks(items, chunkSize) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 function toFeishuApiBlock(block) {

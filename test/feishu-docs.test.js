@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   buildFeishuReviewDocumentTitle,
   convertMarkdownToFeishuDocBlocks,
+  appendBlocksToDocument,
   createFeishuReviewDocument,
 } = require('../feishu-docs');
 
@@ -104,4 +105,35 @@ test('createFeishuReviewDocument falls back to audio filename when chat metadata
   assert.equal(result.title, '客户首咨.m4a-20260420');
   assert.equal(result.documentToken, 'doc_y');
   assert.equal(result.fallbackUsed, true);
+});
+
+test('appendBlocksToDocument splits children into batches of 50', async () => {
+  const requests = [];
+  const blocks = Array.from({ length: 51 }, (_, index) => ({
+    type: 'paragraph',
+    text: `第 ${index + 1} 段`,
+  }));
+
+  await appendBlocksToDocument({
+    token: 'tenant_x',
+    documentToken: 'doc_batch',
+    blocks,
+    timeoutMs: 30000,
+    fetchImpl: async (url, options) => {
+      requests.push({
+        url,
+        body: JSON.parse(options.body),
+      });
+      return {
+        ok: true,
+        json: async () => ({ code: 0, data: {} }),
+      };
+    },
+  });
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].body.children.length, 50);
+  assert.equal(requests[0].body.index, 0);
+  assert.equal(requests[1].body.children.length, 1);
+  assert.equal(requests[1].body.index, 50);
 });

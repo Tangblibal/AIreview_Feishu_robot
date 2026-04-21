@@ -2165,7 +2165,8 @@ async function callAnthropic({ provider, prompt }) {
   );
 
   if (!response.ok) {
-    throw new Error(`Anthropic API error: ${response.status}`);
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Anthropic API error: ${response.status} ${errorText}`.trim());
   }
 
   const data = await response.json();

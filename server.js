@@ -280,6 +280,9 @@ const DEFAULT_CONFIG = {
       api_key: '',
       model: 'claude-opus-4-6',
       max_tokens: 128000,
+      retry_attempts: 2,
+      retry_backoff_ms: 3000,
+      retry_reduced_max_tokens: 32768,
       auth_header: 'Authorization',
       auth_prefix: 'Bearer ',
       timeout_ms: 600000,
@@ -938,6 +941,9 @@ function applyProviderEnv(config, providerName, prefix) {
   assignIfDefined(provider, 'api_key', readEnvString(`${prefix}_API_KEY`, { allowEmpty: true }));
   assignIfDefined(provider, 'model', readEnvString(`${prefix}_MODEL`));
   assignIfDefined(provider, 'max_tokens', readEnvNumber(`${prefix}_MAX_TOKENS`));
+  assignIfDefined(provider, 'retry_attempts', readEnvNumber(`${prefix}_RETRY_ATTEMPTS`));
+  assignIfDefined(provider, 'retry_backoff_ms', readEnvNumber(`${prefix}_RETRY_BACKOFF_MS`));
+  assignIfDefined(provider, 'retry_reduced_max_tokens', readEnvNumber(`${prefix}_RETRY_REDUCED_MAX_TOKENS`));
   assignIfDefined(provider, 'auth_header', readEnvString(`${prefix}_AUTH_HEADER`));
   assignIfDefined(provider, 'auth_prefix', readEnvString(`${prefix}_AUTH_PREFIX`, { allowEmpty: true }));
   assignIfDefined(provider, 'timeout_ms', readEnvNumber(`${prefix}_TIMEOUT_MS`));
@@ -2094,6 +2100,31 @@ function shouldRetryForJsonError(error) {
   return message.includes('json') || message.includes('content');
 }
 
+function shouldRetryForUpstreamError(error) {
+  const message = `${error?.message || ''}`.toLowerCase();
+  return (
+    message.includes('408') ||
+    message.includes('429') ||
+    message.includes('500') ||
+    message.includes('502') ||
+    message.includes('503') ||
+    message.includes('504') ||
+    message.includes('524') ||
+    message.includes('timeout') ||
+    message.includes('aborted')
+  );
+}
+
+function buildRetryProvider(provider, attempt) {
+  if (provider?.type !== 'anthropic' || attempt < 1) {
+    return provider;
+  }
+  return {
+    ...provider,
+    max_tokens: Math.min(provider.max_tokens || 128000, provider.retry_reduced_max_tokens || 32768),
+  };
+}
+
 async function callOpenAICompatible({ provider, prompt, forceJsonMode = true }) {
   const baseUrl = provider.base_url || 'https://api.openai.com/v1';
   const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
@@ -2183,17 +2214,49 @@ async function callModelWithRetry({ provider, prompt }) {
 
 请务必只输出一个完整 JSON 对象，不要输出任何解释、代码块标记、前后缀文本。`;
 
+  const invokeModel = async ({ prompt: nextPrompt, providerOverride = provider }) => {
+    if (providerOverride.type === 'anthropic') {
+      return callAnthropic({ provider: providerOverride, prompt: nextPrompt });
+    }
+    return callOpenAICompatible({ provider: providerOverride, prompt: nextPrompt, forceJsonMode: true });
+  };
+
   try {
-    if (provider.type === 'anthropic') {
-      return await callAnthropic({ provider, prompt });
-    }
-    return await callOpenAICompatible({ provider, prompt, forceJsonMode: true });
+    return await invokeModel({ prompt });
   } catch (error) {
-    if (!shouldRetryForJsonError(error)) throw error;
-    if (provider.type === 'anthropic') {
-      return callAnthropic({ provider, prompt: repairPrompt });
+    if (shouldRetryForJsonError(error)) {
+      return invokeModel({ prompt: repairPrompt });
     }
-    return callOpenAICompatible({ provider, prompt: repairPrompt, forceJsonMode: true });
+    if (!shouldRetryForUpstreamError(error)) throw error;
+
+    const retryAttempts = Math.max(1, provider.retry_attempts || 2);
+    const retryBackoffMs = Math.max(0, provider.retry_backoff_ms || 3000);
+    let lastError = error;
+
+    for (let attempt = 1; attempt < retryAttempts; attempt += 1) {
+      if (retryBackoffMs > 0) {
+        await sleep(retryBackoffMs * attempt);
+      }
+      try {
+        return await invokeModel({
+          prompt,
+          providerOverride: buildRetryProvider(provider, attempt),
+        });
+      } catch (retryError) {
+        if (shouldRetryForJsonError(retryError)) {
+          return invokeModel({
+            prompt: repairPrompt,
+            providerOverride: buildRetryProvider(provider, attempt),
+          });
+        }
+        lastError = retryError;
+        if (!shouldRetryForUpstreamError(retryError)) {
+          throw retryError;
+        }
+      }
+    }
+
+    throw lastError;
   }
 }
 

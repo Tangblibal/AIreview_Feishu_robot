@@ -10,6 +10,7 @@ const { normalizeSalesContext, parseSalesContextFromFields, formatSalesContextFo
 const { buildReviewPrompt } = require('./review-prompt');
 const { analyzeReviewCompleteness, buildIncompleteReportRetryPrompt } = require('./review-output');
 const { submitVolcengineRequestWithRetry } = require('./volcengine-submit-retry');
+const { summarizeVolcenginePollState, classifyVolcengineAsrFailure } = require('./volcengine-asr-debug');
 const { readAnthropicMessageStream } = require('./anthropic-stream');
 const { writeReviewDebugArtifact } = require('./review-debug-export');
 const {
@@ -1461,6 +1462,12 @@ function toFeishuBotFailureText(error) {
   if (error.code === 'VOLCENGINE_RATE_LIMITED') {
     return '当前语音转写服务繁忙（触发限流），系统已自动重试仍未成功，请 1-2 分钟后重试。';
   }
+  if (error.code === 'VOLCENGINE_ASR_TIMEOUT') {
+    return '语音转写超时，火山引擎在轮询窗口内未返回可用文本，请稍后重试；若频繁出现，请检查音频链接可访问性和火山引擎任务状态。';
+  }
+  if (error.code === 'VOLCENGINE_EMPTY_RESULT') {
+    return '语音转写未产出可用文本，可能是录音过短、无声、音质过差，或火山引擎返回了空结果，请检查录音内容后重试。';
+  }
   if (error.code === 'UNSUPPORTED_AUDIO_TYPE') return '文件格式不支持，请发送 mp3/wav/m4a/aac/flac/ogg 音频。';
   if (error.code === 'AUDIO_FILE_TOO_LARGE') return error.message || '音频文件过大，请压缩后重试。';
   if (error.code === 'TOS_REQUIRED') return '当前机器人需要先配置 TOS 才能处理录音。';
@@ -2557,13 +2564,15 @@ async function pollVolcengineAsr2(provider, requestId) {
     await sleep(interval);
   }
 
-  const timeoutError = new Error('Volcengine ASR timeout or empty result');
-  timeoutError.debug = {
+  const debug = summarizeVolcenginePollState({
     requestId,
     lastCode,
     lastMessage,
     lastData,
-  };
+  });
+  const failure = classifyVolcengineAsrFailure(debug);
+  const timeoutError = createAppError(failure.code, failure.message, failure.status, { debug });
+  timeoutError.debug = debug;
   throw timeoutError;
 }
 
@@ -2572,15 +2581,25 @@ async function transcribeWithVolcengineAsr2(provider, fileInfo) {
     throw new Error('Missing Volcengine app_id or access_token');
   }
   const requestId = crypto.randomUUID();
-  await submitVolcengineAsr2(provider, fileInfo, requestId);
-  const result = await pollVolcengineAsr2(provider, requestId);
-  return {
-    ...result.result,
-    debug: {
-      requestId,
-      raw: result.data,
-    },
-  };
+  try {
+    await submitVolcengineAsr2(provider, fileInfo, requestId);
+    const result = await pollVolcengineAsr2(provider, requestId);
+    return {
+      ...result.result,
+      debug: {
+        requestId,
+        raw: result.data,
+      },
+    };
+  } catch (error) {
+    const debug = error?.debug || error?.extra?.debug;
+    if (debug) {
+      console.error(
+        `[stt] request_id=${debug.requestId || requestId} code=${error?.code || 'UNKNOWN'} last_status=${debug.lastStatus || 'unknown'} last_code=${debug.lastCode || 'unknown'} text_length=${debug.textLength || 0} utterance_count=${debug.utteranceCount || 0} last_message=${debug.lastMessage || ''}`,
+      );
+    }
+    throw error;
+  }
 }
 
 async function transcribeAudio(config, file) {

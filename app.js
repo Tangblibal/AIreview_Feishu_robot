@@ -549,18 +549,22 @@ function formatErrorMessage(message, requestId, fallback = '分析失败') {
 }
 
 function applyReviewResult(data) {
-  setRingScore(data.report?.total || mockReport.total);
+  const needScoreValue = Number(data.report?.need);
+  const styleScoreValue = Number(data.report?.style);
+  const objectionScoreValue = Number(data.report?.objection);
+  const closeScoreValue = Number(data.report?.close);
+  setRingScore(Number.isFinite(Number(data.report?.total)) ? Number(data.report?.total) : 0);
   fillScores({
-    need: data.report?.need || mockReport.need,
-    style: data.report?.style || mockReport.style,
-    objection: data.report?.objection || mockReport.objection,
-    close: data.report?.close || mockReport.close,
-    status: data.report?.status || '完成 · AI 已生成复盘',
+    need: Number.isFinite(needScoreValue) ? needScoreValue : 0,
+    style: Number.isFinite(styleScoreValue) ? styleScoreValue : 0,
+    objection: Number.isFinite(objectionScoreValue) ? objectionScoreValue : 0,
+    close: Number.isFinite(closeScoreValue) ? closeScoreValue : 0,
+    status: data.report?.status || '复盘结果不完整，请检查模型输出。',
   });
   if (data.message) {
     statusText.textContent = data.message;
   }
-  renderInsights(data.report?.insights || mockReport.insights);
+  renderInsights(Array.isArray(data.report?.insights) ? data.report.insights : []);
   latestReportMarkdown = data.report?.report_markdown || '';
   renderReportMarkdown(latestReportMarkdown || '暂无复盘报告。');
   if (Array.isArray(data.utterances) && data.utterances.length) {

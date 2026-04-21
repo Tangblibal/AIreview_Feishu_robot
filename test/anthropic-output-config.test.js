@@ -17,6 +17,15 @@ test('Anthropic defaults target Claude Opus 4.6 with configurable max output tok
   assert.match(serverJs, /max_tokens:\s*provider\.max_tokens\s*\|\|\s*128000/);
 });
 
+test('Review pipeline now treats model output as markdown instead of strict JSON', () => {
+  const serverJs = read('server.js');
+  assert.match(serverJs, /function normalizeReportMarkdown\(markdown\)/);
+  assert.match(serverJs, /report_markdown:\s*cleanMarkdown/);
+  assert.match(serverJs, /status:\s*cleanMarkdown \? '完成' : '复盘结果为空，请检查模型输出。'/);
+  assert.match(serverJs, /请直接输出完整 Markdown 复盘正文，不要 JSON/);
+  assert.doesNotMatch(serverJs, /response_format = \{ type: 'json_object' \}/);
+});
+
 test('Anthropic defaults include upstream retry controls for 524 and similar gateway failures', () => {
   const serverJs = read('server.js');
   const envExample = read('.env.example');

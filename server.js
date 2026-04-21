@@ -330,12 +330,7 @@ const DEFAULT_CONFIG = {
 };
 
 const EMPTY_REPORT = {
-  total: 0,
-  need: 0,
-  style: 0,
-  objection: 0,
-  close: 0,
-  status: '复盘结果不完整，请检查模型输出。',
+  status: '复盘结果为空，请检查模型输出。',
   report_markdown: '',
   insights: [],
 };
@@ -2062,43 +2057,19 @@ function parseModelJson(text) {
   return tryParseJsonCandidates([text, normalized, autoClosed]);
 }
 
-function clampScore(value, fallbackValue) {
-  const next = Number(value);
-  if (!Number.isFinite(next)) return fallbackValue;
-  return Math.max(0, Math.min(100, Math.round(next)));
-}
-
-function normalizeReport(report) {
+function normalizeReportMarkdown(markdown) {
   const fallback = EMPTY_REPORT;
-  const source = report && typeof report === 'object' ? report : {};
-  const insights = Array.isArray(source.insights) ? source.insights : [];
+  const cleanMarkdown = `${markdown || ''}`.trim();
   return {
-    total: clampScore(source.total, fallback.total),
-    need: clampScore(source.need, fallback.need),
-    style: clampScore(source.style, fallback.style),
-    objection: clampScore(source.objection, fallback.objection),
-    close: clampScore(source.close, fallback.close),
-    status: typeof source.status === 'string' && source.status.trim() ? source.status : fallback.status,
-    report_markdown:
-      typeof source.report_markdown === 'string' && source.report_markdown.trim()
-        ? source.report_markdown
-        : fallback.report_markdown,
-    insights: insights
-      .map((item) => ({
-        title: item?.title || '',
-        content: item?.content || '',
-        logic: item?.logic || item?.logic_analysis || '',
-        script: item?.script || item?.template || '',
-        tag: item?.tag || '',
-      }))
-      .filter((item) => item.title || item.content || item.logic || item.script || item.tag)
-      .slice(0, 8),
+    status: cleanMarkdown ? '完成' : '复盘结果为空，请检查模型输出。',
+    report_markdown: cleanMarkdown || fallback.report_markdown,
+    insights: [],
   };
 }
 
-function shouldRetryForJsonError(error) {
+function shouldRetryForContentError(error) {
   const message = `${error?.message || ''}`.toLowerCase();
-  return message.includes('json') || message.includes('content');
+  return message.includes('missing content') || message.includes('empty');
 }
 
 function shouldRetryForUpstreamError(error) {
@@ -2126,20 +2097,17 @@ function buildRetryProvider(provider, attempt) {
   };
 }
 
-async function callOpenAICompatible({ provider, prompt, forceJsonMode = true }) {
+async function callOpenAICompatible({ provider, prompt }) {
   const baseUrl = provider.base_url || 'https://api.openai.com/v1';
   const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
   const payload = {
     model: provider.model || 'gpt-4o-mini',
     messages: [
-      { role: 'system', content: '你是销售复盘专家，请严格输出 JSON。' },
+      { role: 'system', content: '你是销售复盘专家，请直接输出完整 Markdown 复盘正文，不要 JSON，不要额外解释。' },
       { role: 'user', content: prompt },
     ],
     temperature: 0.2,
   };
-  if (forceJsonMode) {
-    payload.response_format = { type: 'json_object' };
-  }
 
   const response = await fetchWithTimeout(
     url,
@@ -2159,7 +2127,7 @@ async function callOpenAICompatible({ provider, prompt, forceJsonMode = true }) 
   const data = await response.json();
   const text = data?.choices?.[0]?.message?.content;
   if (!text) throw new Error('OpenAI-compatible response missing content');
-  return parseModelJson(text);
+  return `${text}`.trim();
 }
 
 async function callAnthropic({ provider, prompt }) {
@@ -2169,7 +2137,7 @@ async function callAnthropic({ provider, prompt }) {
     model: provider.model || 'claude-opus-4-6',
     max_tokens: provider.max_tokens || 128000,
     stream: true,
-    system: '你是销售复盘专家，请严格输出 JSON。',
+    system: '你是销售复盘专家，请直接输出完整 Markdown 复盘正文，不要 JSON，不要额外解释。',
     messages: [{ role: 'user', content: prompt }],
   };
   const authHeader = provider.auth_header || 'x-api-key';
@@ -2207,26 +2175,22 @@ async function callAnthropic({ provider, prompt }) {
 
   const text = await readAnthropicMessageStream(response.body);
   if (!text) throw new Error('Anthropic API response missing content');
-  return parseModelJson(text);
+  return `${text}`.trim();
 }
 
 async function callModelWithRetry({ provider, prompt }) {
-  const repairPrompt = `${prompt}
-
-请务必只输出一个完整 JSON 对象，不要输出任何解释、代码块标记、前后缀文本。`;
-
   const invokeModel = async ({ prompt: nextPrompt, providerOverride = provider }) => {
     if (providerOverride.type === 'anthropic') {
       return callAnthropic({ provider: providerOverride, prompt: nextPrompt });
     }
-    return callOpenAICompatible({ provider: providerOverride, prompt: nextPrompt, forceJsonMode: true });
+    return callOpenAICompatible({ provider: providerOverride, prompt: nextPrompt });
   };
 
   try {
     return await invokeModel({ prompt });
   } catch (error) {
-    if (shouldRetryForJsonError(error)) {
-      return invokeModel({ prompt: repairPrompt });
+    if (shouldRetryForContentError(error)) {
+      return invokeModel({ prompt });
     }
     if (!shouldRetryForUpstreamError(error)) throw error;
 
@@ -2244,9 +2208,9 @@ async function callModelWithRetry({ provider, prompt }) {
           providerOverride: buildRetryProvider(provider, attempt),
         });
       } catch (retryError) {
-        if (shouldRetryForJsonError(retryError)) {
+        if (shouldRetryForContentError(retryError)) {
           return invokeModel({
-            prompt: repairPrompt,
+            prompt,
             providerOverride: buildRetryProvider(provider, attempt),
           });
         }
@@ -2581,7 +2545,7 @@ async function runSingleReviewPipeline(payload) {
       payload?.text_input || payload?.textInput || payload?.text || '',
     );
     const prompt = buildPrompt(enrichedTranscript, payload.templates || [], payload.salesContext || {});
-    const report = normalizeReport(await callModelWithRetry({ provider, prompt }));
+    const report = normalizeReportMarkdown(await callModelWithRetry({ provider, prompt }));
 
     return {
       report,
@@ -3152,7 +3116,7 @@ const server = http.createServer(async (req, res) => {
         body.sales_context || body.salesContext || body.customer_order_context || body.customerOrderContext || {},
       );
       const prompt = buildPrompt(body.transcript || '', body.templates || [], salesContext);
-      const report = normalizeReport(await callModelWithRetry({ provider, prompt }));
+      const report = normalizeReportMarkdown(await callModelWithRetry({ provider, prompt }));
 
       return sendJson(res, 200, { ok: true, report });
     } catch (error) {

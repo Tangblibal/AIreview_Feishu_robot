@@ -57,11 +57,10 @@ test('mergeTranscriptWithTextInput combines supplemental text and transcript', (
   assert.match(merged, /语音转写：/);
 });
 
-test('formatFeishuBotReply formats scores and truncates safely', () => {
+test('formatFeishuBotReply uses markdown summary without score lines', () => {
   const longMarkdown = 'A'.repeat(5000);
   const message = formatFeishuBotReply({
     report: {
-      total: 88,
       status: '完成',
       report_markdown: longMarkdown,
     },
@@ -70,29 +69,27 @@ test('formatFeishuBotReply formats scores and truncates safely', () => {
   });
 
   assert.match(message, /销售复盘已完成。/);
-  assert.match(message, /综合评分：88 分/);
+  assert.doesNotMatch(message, /综合评分：/);
   assert.match(message, /补充文字：客户偏韩式清透风/);
   assert.ok(message.length <= 400);
 });
 
-test('formatFeishuDocReply includes title, score, and document url', () => {
+test('formatFeishuDocReply includes title and document url without score lines', () => {
   const text = formatFeishuDocReply({
     title: '苏州门店复盘群-20260420-张三',
     url: 'https://acnujre61sh3.feishu.cn/docx/abc',
-    score: 88,
     status: '完成',
   });
 
   assert.match(text, /销售复盘已完成/);
   assert.match(text, /苏州门店复盘群-20260420-张三/);
-  assert.match(text, /88/);
+  assert.doesNotMatch(text, /综合评分：/);
   assert.match(text, /https:\/\/acnujre61sh3\.feishu\.cn\/docx\/abc/);
 });
 
 test('formatFeishuDocFailureFallback keeps reply short and uses report summary first', () => {
   const text = formatFeishuDocFailureFallback({
     report: {
-      total: 91,
       status: '完成',
       report_markdown: '## 综合评估\n整体跟进节奏稳定，客户对套餐价格敏感。',
     },
@@ -102,7 +99,7 @@ test('formatFeishuDocFailureFallback keeps reply short and uses report summary f
   });
 
   assert.match(text, /销售复盘已完成。/);
-  assert.match(text, /综合评分：91 分/);
+  assert.doesNotMatch(text, /综合评分：/);
   assert.match(text, /状态：完成/);
   assert.match(text, /整体跟进节奏稳定/);
   assert.ok(text.length <= 120);
@@ -123,7 +120,6 @@ test('buildFeishuReviewReply uses document link reply when docs are enabled and 
       token: 'tenant_x',
       result: {
         report: {
-          total: 88,
           status: '完成',
           report_markdown: '## 综合评估\n整体转化把控较稳。',
         },
@@ -166,7 +162,6 @@ test('buildFeishuReviewReply falls back to short text when document creation fai
       token: 'tenant_x',
       result: {
         report: {
-          total: 92,
           status: '完成',
           report_markdown: '## 综合评估\n整体沟通比较顺畅，报价阶段需要更早收口。',
         },
@@ -189,7 +184,7 @@ test('buildFeishuReviewReply falls back to short text when document creation fai
 
   assert.equal(reply.mode, 'text_fallback');
   assert.match(reply.replyText, /销售复盘已完成。/);
-  assert.match(reply.replyText, /综合评分：92 分/);
+  assert.doesNotMatch(reply.replyText, /综合评分：/);
   assert.match(reply.replyText, /整体沟通比较顺畅/);
   assert.match(reply.error.message, /folder not found/);
 });
@@ -207,7 +202,6 @@ test('buildFeishuReviewReply keeps existing text reply when docs are disabled', 
     token: 'tenant_x',
     result: {
       report: {
-        total: 86,
         status: '完成',
         report_markdown: '## 综合评估\n原有文本回复路径。',
       },

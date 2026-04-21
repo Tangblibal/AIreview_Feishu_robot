@@ -120,17 +120,18 @@ const mockReport = {
   ],
 };
 
-function setRingScore(score) {
-  const offset = CIRCUMFERENCE - (score / 100) * CIRCUMFERENCE;
+function setRingScore(score, hasScore = true) {
+  const safeScore = hasScore && Number.isFinite(Number(score)) ? Number(score) : 0;
+  const offset = CIRCUMFERENCE - (safeScore / 100) * CIRCUMFERENCE;
   ring.style.strokeDashoffset = `${offset}`;
-  scoreValue.textContent = `${score}`;
+  scoreValue.textContent = hasScore ? `${Math.round(safeScore)}` : '--';
 }
 
 function fillScores(data) {
-  needScore.textContent = `${data.need}/100`;
-  styleScore.textContent = `${data.style}/100`;
-  objectionScore.textContent = `${data.objection}/100`;
-  closeScore.textContent = `${data.close}/100`;
+  needScore.textContent = Number.isFinite(Number(data.need)) ? `${Math.round(Number(data.need))}/100` : '--';
+  styleScore.textContent = Number.isFinite(Number(data.style)) ? `${Math.round(Number(data.style))}/100` : '--';
+  objectionScore.textContent = Number.isFinite(Number(data.objection)) ? `${Math.round(Number(data.objection))}/100` : '--';
+  closeScore.textContent = Number.isFinite(Number(data.close)) ? `${Math.round(Number(data.close))}/100` : '--';
   statusText.textContent = data.status;
 }
 
@@ -553,13 +554,14 @@ function applyReviewResult(data) {
   const styleScoreValue = Number(data.report?.style);
   const objectionScoreValue = Number(data.report?.objection);
   const closeScoreValue = Number(data.report?.close);
-  setRingScore(Number.isFinite(Number(data.report?.total)) ? Number(data.report?.total) : 0);
+  const totalScoreValue = Number(data.report?.total);
+  setRingScore(totalScoreValue, Number.isFinite(totalScoreValue));
   fillScores({
-    need: Number.isFinite(needScoreValue) ? needScoreValue : 0,
-    style: Number.isFinite(styleScoreValue) ? styleScoreValue : 0,
-    objection: Number.isFinite(objectionScoreValue) ? objectionScoreValue : 0,
-    close: Number.isFinite(closeScoreValue) ? closeScoreValue : 0,
-    status: data.report?.status || '复盘结果不完整，请检查模型输出。',
+    need: Number.isFinite(needScoreValue) ? needScoreValue : null,
+    style: Number.isFinite(styleScoreValue) ? styleScoreValue : null,
+    objection: Number.isFinite(objectionScoreValue) ? objectionScoreValue : null,
+    close: Number.isFinite(closeScoreValue) ? closeScoreValue : null,
+    status: data.report?.status || '复盘结果为空，请检查模型输出。',
   });
   if (data.message) {
     statusText.textContent = data.message;

@@ -71,9 +71,6 @@ function formatFeishuBotReply({ report, transcript, textInput, maxLength = 3500 
   const result = report && typeof report === 'object' ? report : {};
   const lines = [];
   lines.push('销售复盘已完成。');
-  if (Number.isFinite(result.total)) {
-    lines.push(`综合评分：${Math.round(result.total)} 分`);
-  }
   if (typeof result.status === 'string' && result.status.trim()) {
     lines.push(`状态：${result.status.trim()}`);
   }
@@ -96,9 +93,6 @@ function formatFeishuDocReply({ title, url, score, status, maxLength = 1200 }) {
   if (`${title || ''}`.trim()) {
     lines.push(`文档标题：${`${title}`.trim()}`);
   }
-  if (Number.isFinite(score)) {
-    lines.push(`综合评分：${Math.round(score)} 分`);
-  }
   if (`${status || ''}`.trim()) {
     lines.push(`状态：${`${status}`.trim()}`);
   }
@@ -111,9 +105,6 @@ function formatFeishuDocReply({ title, url, score, status, maxLength = 1200 }) {
 function formatFeishuDocFailureFallback({ report, transcript, textInput, maxLength = 500 }) {
   const result = report && typeof report === 'object' ? report : {};
   const lines = ['销售复盘已完成。'];
-  if (Number.isFinite(result.total)) {
-    lines.push(`综合评分：${Math.round(result.total)} 分`);
-  }
   if (`${result.status || ''}`.trim()) {
     lines.push(`状态：${`${result.status}`.trim()}`);
   }

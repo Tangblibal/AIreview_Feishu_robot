@@ -305,15 +305,19 @@ const DEFAULT_CONFIG = {
     },
   },
   stt: {
-    active_provider: 'qwen_fun_asr',
+    active_provider: 'doubao_asr_2',
     providers: {
-      qwen_fun_asr: {
-        type: 'dashscope-fun-asr',
-        base_url: 'https://dashscope.aliyuncs.com/api/v1',
-        api_key: '',
-        model: 'fun-asr',
-        diarization_enabled: true,
-        speaker_count: 2,
+      doubao_asr_2: {
+        type: 'volcengine-asr2',
+        base_url: 'https://openspeech.bytedance.com/api/v3/auc/bigmodel',
+        app_id: '',
+        access_token: '',
+        resource_id: 'volc.seedasr.auc',
+        model_name: 'bigmodel',
+        enable_itn: true,
+        enable_punc: true,
+        enable_speaker_info: true,
+        show_utterances: true,
         public_base_url: '',
         public_path: '/uploads',
       },
@@ -988,7 +992,6 @@ function applyEnvOverrides(baseConfig) {
   if (!isPlainObject(config.stt)) config.stt = {};
   assignIfDefined(config.stt, 'active_provider', readEnvString('STT_ACTIVE_PROVIDER'));
   applySttProviderEnv(config, 'doubao_asr_2', 'STT_DOUBAO_ASR_2');
-  applySttProviderEnv(config, 'qwen_fun_asr', 'STT_QWEN_FUN_ASR');
 
   if (!isPlainObject(config.tos)) config.tos = {};
   assignIfDefined(config.tos, 'enabled', readEnvBoolean('TOS_ENABLED'));
@@ -1033,10 +1036,10 @@ function getActiveProvider(config) {
 
 function getActiveSttProvider(config) {
   const sttConfig = config.stt || {};
-  const name = sttConfig.active_provider || 'deepgram';
+  const name = sttConfig.active_provider || 'doubao_asr_2';
   const provider = sttConfig.providers?.[name];
   if (!provider) {
-    return { name: 'deepgram', config: null };
+    return { name: 'doubao_asr_2', config: null };
   }
   return { name, config: provider };
 }
@@ -2309,57 +2312,6 @@ function buildTranscript(utterances) {
     .join('\n');
 }
 
-async function transcribeWithDeepgram(provider, file) {
-  const params = new URLSearchParams();
-  if (provider.model) params.set('model', provider.model);
-  if (provider.language) params.set('language', provider.language);
-  if (provider.diarize) params.set('diarize', 'true');
-  if (provider.utterances) params.set('utterances', 'true');
-  if (provider.punctuate) params.set('punctuate', 'true');
-  if (provider.smart_format) params.set('smart_format', 'true');
-
-  const baseUrl = provider.base_url || 'https://api.deepgram.com/v1/listen';
-  const url = `${baseUrl.replace(/\\?$/, '')}?${params.toString()}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Token ${provider.api_key}`,
-      'Content-Type': file.contentType || 'application/octet-stream',
-    },
-    body: file.data,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Deepgram API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const alt = data?.results?.channels?.[0]?.alternatives?.[0] || {};
-  return {
-    transcript: alt.transcript || '',
-    utterances: alt.utterances || data?.results?.utterances || [],
-    words: alt.words || [],
-  };
-}
-
-function extractDashScopeTranscript(resultJson) {
-  const transcripts = resultJson?.transcripts || resultJson?.result?.transcripts || [];
-  const transcriptText = transcripts.map((item) => item.text || '').filter(Boolean).join('\n');
-  const utterances = [];
-  transcripts.forEach((item) => {
-    const sentences = item.sentences || [];
-    sentences.forEach((sentence) => {
-      utterances.push({
-        speaker: sentence.speaker_id ?? sentence.speakerId ?? 0,
-        start: sentence.begin_time ? sentence.begin_time / 1000 : undefined,
-        end: sentence.end_time ? sentence.end_time / 1000 : undefined,
-        text: sentence.text || '',
-      });
-    });
-  });
-  return { transcript: transcriptText, utterances };
-}
-
 function inferAudioFormat(file) {
   const name = file.filename || '';
   const ext = path.extname(name).toLowerCase().replace('.', '');
@@ -2505,109 +2457,10 @@ async function transcribeWithVolcengineAsr2(provider, fileInfo) {
   };
 }
 
-async function pollDashScopeTask(provider, taskId) {
-  const baseUrl = provider.base_url || 'https://dashscope.aliyuncs.com/api/v1';
-  const url = `${baseUrl.replace(/\/$/, '')}/tasks/${taskId}`;
-  const headers = buildAuthHeaders(provider);
-  const maxAttempts = provider.poll_max_attempts || 30;
-  const interval = provider.poll_interval_ms || 2000;
-  const primaryMethod = provider.query_method || 'POST';
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    let response = await fetch(url, {
-      method: primaryMethod,
-      headers,
-    });
-    if (!response.ok && primaryMethod !== 'GET') {
-      response = await fetch(url, {
-        method: 'GET',
-        headers,
-      });
-    }
-    if (!response.ok) {
-      throw new Error(`DashScope task query error: ${response.status}`);
-    }
-    const data = await response.json();
-    const status =
-      data?.output?.task_status || data?.output?.taskStatus || data?.task_status || data?.taskStatus || '';
-    if (status === 'SUCCEEDED') {
-      return data;
-    }
-    if (status === 'FAILED') {
-      throw new Error('DashScope task failed');
-    }
-    await sleep(interval);
-  }
-
-  throw new Error('DashScope task timeout');
-}
-
-async function transcribeWithDashScopeFunAsr(provider, fileInfo) {
-  const fileUrl = fileInfo.publicUrl || buildPublicFileUrl(provider, fileInfo.filename);
-  const baseUrl = provider.base_url || 'https://dashscope.aliyuncs.com/api/v1';
-  const submitUrl = `${baseUrl.replace(/\/$/, '')}/services/audio/asr/transcription`;
-  const payload = {
-    model: provider.model || 'fun-asr',
-    input: { file_urls: [fileUrl] },
-    parameters: {
-      diarization_enabled: provider.diarization_enabled !== false,
-      speaker_count: provider.speaker_count || 2,
-    },
-  };
-
-  const response = await fetch(submitUrl, {
-    method: 'POST',
-    headers: {
-      ...buildAuthHeaders(provider),
-      'X-DashScope-Async': 'enable',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    throw new Error(`DashScope submit error: ${response.status}`);
-  }
-
-  const submitData = await response.json();
-  const taskId =
-    submitData?.output?.task_id || submitData?.output?.taskId || submitData?.task_id || submitData?.taskId;
-  if (!taskId) {
-    throw new Error('DashScope task_id missing');
-  }
-
-  const taskData = await pollDashScopeTask(provider, taskId);
-  const results = taskData?.output?.results || [];
-  const transcriptionUrl = results[0]?.transcription_url || results[0]?.transcriptionUrl;
-  if (!transcriptionUrl) {
-    return { transcript: '', utterances: [], words: [] };
-  }
-
-  const transcriptionResponse = await fetch(transcriptionUrl);
-  if (!transcriptionResponse.ok) {
-    throw new Error(`DashScope transcription fetch error: ${transcriptionResponse.status}`);
-  }
-  const transcriptionJson = await transcriptionResponse.json();
-  const { transcript, utterances } = extractDashScopeTranscript(transcriptionJson);
-  return { transcript, utterances, words: [] };
-}
-
 async function transcribeAudio(config, file) {
   const { config: provider } = getActiveSttProvider(config);
   if (!provider) {
     throw new Error('Missing STT config');
-  }
-
-  if (provider.type === 'deepgram') {
-    if (!provider.api_key) {
-      throw new Error('Missing Deepgram API key');
-    }
-    return transcribeWithDeepgram(provider, file);
-  }
-  if (provider.type === 'dashscope-fun-asr') {
-    if (!provider.api_key) {
-      throw new Error('Missing DashScope API key');
-    }
-    return transcribeWithDashScopeFunAsr(provider, file);
   }
   if (provider.type === 'volcengine-asr2') {
     return transcribeWithVolcengineAsr2(provider, file);
@@ -2639,18 +2492,6 @@ async function runSingleReviewPipeline(payload) {
     if (runtimeTosObjectKey && config.tos?.enabled) {
       runtimePublicUrl = getTosSignedUrlByObjectKey(config.tos, runtimeTosObjectKey);
     }
-    if ((!fileBuffer || fileBuffer.length === 0) && sttProvider?.type === 'deepgram' && runtimePublicUrl) {
-      const remoteFileResponse = await fetchWithTimeout(runtimePublicUrl, { method: 'GET' }, 120000);
-      if (!remoteFileResponse.ok) {
-        throw createAppError(
-          'FETCH_REMOTE_AUDIO_FAILED',
-          `Failed to fetch audio from TOS: ${remoteFileResponse.status}`,
-          502,
-        );
-      }
-      fileBuffer = Buffer.from(await remoteFileResponse.arrayBuffer());
-    }
-
     let fileInfo = {
       filename: runtimeFilename,
       contentType: payload?.file?.contentType || 'application/octet-stream',

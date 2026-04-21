@@ -22,6 +22,17 @@ test('writeReviewDebugArtifact writes report markdown payload when export dir is
     enrichedTranscript: '销售：您好',
     prompt: 'prompt body',
     report: { status: '完成', report_markdown: '## 综合评估\n内容完整' },
+    modelMeta: { stopReason: 'end_turn' },
+    completeness: {
+      complete: true,
+      reason: 'ok',
+      scene: 'A',
+      expectedStages: ['A1', 'A8'],
+      presentStages: ['A1', 'A8'],
+      missingStages: [],
+      lastStage: 'A8',
+      abruptEnding: false,
+    },
   });
 
   assert.equal(result.written, true);
@@ -34,6 +45,9 @@ test('writeReviewDebugArtifact writes report markdown payload when export dir is
   assert.equal(payload.lengths.transcript, 5);
   assert.equal(payload.lengths.prompt, 11);
   assert.equal(payload.report.report_markdown, '## 综合评估\n内容完整');
+  assert.equal(payload.model_meta.stop_reason, 'end_turn');
+  assert.equal(payload.completeness.complete, true);
+  assert.equal(payload.completeness.last_stage, 'A8');
 });
 
 test('writeReviewDebugArtifact no-ops when export dir is disabled', async () => {

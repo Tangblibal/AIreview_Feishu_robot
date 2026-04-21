@@ -9,6 +9,7 @@ const feishuDocsJs = fs.readFileSync(path.join(__dirname, '..', 'feishu-docs.js'
 test('review pipeline logs transcript and report lengths for diagnostics', () => {
   assert.match(serverJs, /\[review_pipeline\].*transcript_length=/);
   assert.match(serverJs, /\[review_pipeline\].*report_length=/);
+  assert.match(serverJs, /\[review_pipeline\].*incomplete_report attempt=/);
 });
 
 test('feishu docs logs block diagnostics before append', () => {
@@ -19,4 +20,6 @@ test('feishu docs logs block diagnostics before append', () => {
 test('review pipeline exports raw debug artifact when debug dir is enabled', () => {
   assert.match(serverJs, /writeReviewDebugArtifact/);
   assert.match(serverJs, /\[review_debug\].*exported file=/);
+  assert.match(serverJs, /completeness:/);
+  assert.match(serverJs, /modelMeta:/);
 });

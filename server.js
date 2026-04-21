@@ -8,6 +8,7 @@ const formidable = require('formidable');
 const { TosClient } = require('@volcengine/tos-sdk');
 const { normalizeSalesContext, parseSalesContextFromFields, formatSalesContextForPrompt } = require('./sales-context');
 const { buildReviewPrompt } = require('./review-prompt');
+const { analyzeReviewCompleteness, buildIncompleteReportRetryPrompt } = require('./review-output');
 const { submitVolcengineRequestWithRetry } = require('./volcengine-submit-retry');
 const { readAnthropicMessageStream } = require('./anthropic-stream');
 const { writeReviewDebugArtifact } = require('./review-debug-export');
@@ -34,6 +35,10 @@ const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const SESSION_COOKIE_NAME = 'lumo_session';
 const REDIS_URL = process.env.REDIS_URL || process.env.RAILWAY_REDIS_URL || '';
 const REVIEW_DEBUG_EXPORT_DIR = `${process.env.REVIEW_DEBUG_EXPORT_DIR || ''}`.trim();
+const REVIEW_OUTPUT_INCOMPLETE_RETRY_ATTEMPTS = envInteger('REVIEW_OUTPUT_INCOMPLETE_RETRY_ATTEMPTS', 1, {
+  min: 0,
+  max: 3,
+});
 
 const sessionStore = new Map();
 const oauthStateStore = new Map();
@@ -1898,6 +1903,18 @@ function buildPrompt(transcript, templates, salesContext = {}) {
   });
 }
 
+function buildIncompleteRetryPrompt(transcript, templates, salesContext, completeness) {
+  const templateText = templates
+    .map((section) => `- ${section.title}: ${section.items.join('、')}`)
+    .join('\n');
+  return buildIncompleteReportRetryPrompt({
+    transcript: transcript || '（空）',
+    templateBlock: templateText || '（无模板）',
+    salesContextBlock: formatSalesContextForPrompt(salesContext || {}),
+    completeness,
+  });
+}
+
 function buildAuthHeaders(provider) {
   const headers = { 'Content-Type': 'application/json' };
   const authHeader = provider.auth_header || 'Authorization';
@@ -2131,7 +2148,12 @@ async function callOpenAICompatible({ provider, prompt }) {
   const data = await response.json();
   const text = data?.choices?.[0]?.message?.content;
   if (!text) throw new Error('OpenAI-compatible response missing content');
-  return `${text}`.trim();
+  return {
+    text: `${text}`.trim(),
+    meta: {
+      finishReason: `${data?.choices?.[0]?.finish_reason || ''}`.trim() || null,
+    },
+  };
 }
 
 async function callAnthropic({ provider, prompt }) {
@@ -2193,7 +2215,12 @@ async function callAnthropic({ provider, prompt }) {
   if (!text) {
     throw new Error('Anthropic API response missing content');
   }
-  return text;
+  return {
+    text,
+    meta: {
+      stopReason: `${result?.stopReason || ''}`.trim() || null,
+    },
+  };
 }
 
 async function callModelWithRetry({ provider, prompt }) {
@@ -2241,6 +2268,59 @@ async function callModelWithRetry({ provider, prompt }) {
 
     throw lastError;
   }
+}
+
+async function generateReviewReportResult({
+  provider,
+  prompt,
+  transcript,
+  templates,
+  salesContext,
+  requestId,
+}) {
+  const totalAttempts = 1 + REVIEW_OUTPUT_INCOMPLETE_RETRY_ATTEMPTS;
+  let nextPrompt = prompt;
+  let lastResult = null;
+
+  for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+    const modelResult = await callModelWithRetry({ provider, prompt: nextPrompt });
+    const report = normalizeReportMarkdown(modelResult?.text || '');
+    const completeness = analyzeReviewCompleteness(report.report_markdown, {
+      stopReason: modelResult?.meta?.stopReason || modelResult?.meta?.finishReason || '',
+    });
+
+    lastResult = {
+      report,
+      modelMeta: modelResult?.meta || {},
+      completeness,
+      prompt: nextPrompt,
+      attemptsUsed: attempt,
+    };
+
+    console.log(
+      `[review_pipeline] request_id=${requestId || 'n/a'} provider=${provider.type || 'unknown'} model=${provider.model || 'unknown'} report_length=${`${report.report_markdown || ''}`.length} status=${report.status || 'unknown'} stop_reason=${modelResult?.meta?.stopReason || modelResult?.meta?.finishReason || 'none'} completeness=${completeness.complete ? 'complete' : 'incomplete'} completeness_reason=${completeness.reason || 'ok'} last_stage=${completeness.lastStage || 'none'}`,
+    );
+
+    if (completeness.complete || attempt >= totalAttempts) {
+      return lastResult;
+    }
+
+    console.warn(
+      `[review_pipeline] request_id=${requestId || 'n/a'} incomplete_report attempt=${attempt}/${totalAttempts} reason=${completeness.reason || 'unknown'} scene=${completeness.scene || 'unknown'} last_stage=${completeness.lastStage || 'none'} missing_stages=${completeness.missingStages.join(',') || 'none'} stop_reason=${modelResult?.meta?.stopReason || modelResult?.meta?.finishReason || 'none'}`,
+    );
+
+    nextPrompt = buildIncompleteRetryPrompt(transcript, templates, salesContext, completeness);
+  }
+
+  return (
+    lastResult || {
+      report: normalizeReportMarkdown(''),
+      modelMeta: {},
+      completeness: analyzeReviewCompleteness(''),
+      prompt,
+      attemptsUsed: totalAttempts,
+    }
+  );
 }
 
 function splitBuffer(buffer, separator) {
@@ -2566,18 +2646,25 @@ async function runSingleReviewPipeline(payload) {
     console.log(
       `[review_pipeline] request_id=${payload?.requestId || 'n/a'} provider=${provider.type || 'unknown'} model=${provider.model || 'unknown'} transcript_length=${transcript.length} enriched_transcript_length=${enrichedTranscript.length} prompt_length=${prompt.length}`,
     );
-    const report = normalizeReportMarkdown(await callModelWithRetry({ provider, prompt }));
-    console.log(
-      `[review_pipeline] request_id=${payload?.requestId || 'n/a'} provider=${provider.type || 'unknown'} model=${provider.model || 'unknown'} report_length=${`${report.report_markdown || ''}`.length} status=${report.status || 'unknown'}`,
-    );
+    const generated = await generateReviewReportResult({
+      provider,
+      prompt,
+      transcript: enrichedTranscript,
+      templates: payload.templates || [],
+      salesContext: payload.salesContext || {},
+      requestId: payload?.requestId || '',
+    });
+    const report = generated.report;
     const debugExport = await writeReviewDebugArtifact({
       exportDir: REVIEW_DEBUG_EXPORT_DIR,
       requestId: payload?.requestId || '',
       provider,
       transcript,
       enrichedTranscript,
-      prompt,
+      prompt: generated.prompt || prompt,
       report,
+      modelMeta: generated.modelMeta,
+      completeness: generated.completeness,
     });
     if (debugExport.written) {
       console.log(
@@ -3156,7 +3243,15 @@ const server = http.createServer(async (req, res) => {
         body.sales_context || body.salesContext || body.customer_order_context || body.customerOrderContext || {},
       );
       const prompt = buildPrompt(body.transcript || '', body.templates || [], salesContext);
-      const report = normalizeReportMarkdown(await callModelWithRetry({ provider, prompt }));
+      const generated = await generateReviewReportResult({
+        provider,
+        prompt,
+        transcript: body.transcript || '',
+        templates: body.templates || [],
+        salesContext,
+        requestId: req.requestId,
+      });
+      const report = generated.report;
 
       return sendJson(res, 200, { ok: true, report });
     } catch (error) {

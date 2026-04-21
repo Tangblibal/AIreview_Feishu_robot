@@ -14,6 +14,16 @@ test('extractAnthropicStreamEventText returns delta text from content_block_delt
   assert.equal(extractAnthropicStreamEventText(eventBlock), '你好');
 });
 
+test('extractAnthropicStreamEventText returns initial text from content_block_start event', () => {
+  const eventBlock = [
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"{"}}',
+    '',
+  ].join('\n');
+
+  assert.equal(extractAnthropicStreamEventText(eventBlock), '{');
+});
+
 test('readAnthropicMessageStream concatenates Anthropic SSE text deltas across chunks', async () => {
   const stream = new ReadableStream({
     start(controller) {
@@ -22,8 +32,10 @@ test('readAnthropicMessageStream concatenates Anthropic SSE text deltas across c
           [
             'event: message_start\n',
             'data: {"type":"message_start"}\n\n',
+            'event: content_block_start\n',
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"{"}}\n\n',
             'event: content_block_delta\n',
-            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\\"ok\\":"}}\n\n',
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\\"ok\\":"}}\n\n',
           ].join(''),
         ),
       );

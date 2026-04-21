@@ -30,6 +30,10 @@ function extractAnthropicStreamEventText(eventBlock) {
     throw new Error(message);
   }
 
+  if (eventName === 'content_block_start' || payload?.type === 'content_block_start') {
+    return payload?.content_block?.text || '';
+  }
+
   if (eventName === 'content_block_delta' || payload?.type === 'content_block_delta') {
     return payload?.delta?.text || '';
   }

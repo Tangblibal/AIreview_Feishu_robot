@@ -6,6 +6,7 @@ const {
   convertMarkdownToFeishuDocBlocks,
   appendBlocksToDocument,
   createFeishuReviewDocument,
+  summarizeFeishuDocBlocks,
 } = require('../feishu-docs');
 
 test('buildFeishuReviewDocumentTitle uses chat-date-sender when metadata exists', () => {
@@ -136,4 +137,18 @@ test('appendBlocksToDocument splits children into batches of 50', async () => {
   assert.equal(requests[0].body.index, 0);
   assert.equal(requests[1].body.children.length, 1);
   assert.equal(requests[1].body.index, 50);
+});
+
+test('summarizeFeishuDocBlocks reports block and batch counts', () => {
+  const summary = summarizeFeishuDocBlocks([
+    { type: 'heading2', text: '综合评估' },
+    { type: 'paragraph', text: '第一段' },
+    { type: 'paragraph', text: '第二段' },
+  ]);
+
+  assert.deepEqual(summary, {
+    blockCount: 3,
+    childCount: 3,
+    batchCount: 1,
+  });
 });

@@ -1534,6 +1534,7 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
 
     await sendFeishuBotTextMessage(config, receiveId, '已收到录音，正在上传、转写并生成复盘，请稍候。');
     const result = await runSingleReviewPipeline({
+      requestId,
       templates: [],
       salesContext: {},
       text_input: textInput,
@@ -1555,6 +1556,7 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
           result,
           textInput,
           context: {
+            requestId,
             chatId: `${message.chat_id || ''}`.trim(),
             senderId: resolveFeishuSenderId(event),
             audioFileName: downloaded.filename,
@@ -2559,7 +2561,13 @@ async function runSingleReviewPipeline(payload) {
       payload?.text_input || payload?.textInput || payload?.text || '',
     );
     const prompt = buildPrompt(enrichedTranscript, payload.templates || [], payload.salesContext || {});
+    console.log(
+      `[review_pipeline] request_id=${payload?.requestId || 'n/a'} provider=${provider.type || 'unknown'} model=${provider.model || 'unknown'} transcript_length=${transcript.length} enriched_transcript_length=${enrichedTranscript.length} prompt_length=${prompt.length}`,
+    );
     const report = normalizeReportMarkdown(await callModelWithRetry({ provider, prompt }));
+    console.log(
+      `[review_pipeline] request_id=${payload?.requestId || 'n/a'} provider=${provider.type || 'unknown'} model=${provider.model || 'unknown'} report_length=${`${report.report_markdown || ''}`.length} status=${report.status || 'unknown'}`,
+    );
 
     return {
       report,
@@ -3054,6 +3062,7 @@ const server = http.createServer(async (req, res) => {
 
       if (mode === 'sync') {
         const result = await runSingleReviewPipeline({
+          requestId: req.requestId,
           templates,
           salesContext,
           file: tosFilePayload,
@@ -3071,6 +3080,7 @@ const server = http.createServer(async (req, res) => {
           requestId: req.requestId,
           ownerKey: buildJobOwnerKey(auth.user, req),
           payload: {
+            requestId: req.requestId,
             templates,
             salesContext,
             file: tosFilePayload,

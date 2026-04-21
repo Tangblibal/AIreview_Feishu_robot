@@ -32,6 +32,16 @@ function convertMarkdownToFeishuDocBlocks(markdown) {
   return splitIntoSimpleBlocks(markdown).map(toFeishuBlock);
 }
 
+function summarizeFeishuDocBlocks(blocks) {
+  const normalizedBlocks = Array.isArray(blocks) ? blocks : [];
+  const children = normalizeFeishuBlockPayload(normalizedBlocks);
+  return {
+    blockCount: normalizedBlocks.length,
+    childCount: children.length,
+    batchCount: children.length ? splitIntoChunks(children, 50).length : 0,
+  };
+}
+
 async function resolveFeishuChatName({ token, chatId, fetchImpl, timeoutMs }) {
   if (!token || !chatId) return '';
   try {
@@ -93,12 +103,15 @@ async function createDocumentDirectly({ token, title, fetchImpl, timeoutMs }) {
   };
 }
 
-async function appendBlocksToDocument({ token, documentToken, blocks, fetchImpl, timeoutMs }) {
+async function appendBlocksToDocument({ token, documentToken, blocks, fetchImpl, timeoutMs, requestId }) {
   const children = normalizeFeishuBlockPayload(blocks);
   if (!children.length) return;
   const batches = splitIntoChunks(children, 50);
   for (let index = 0; index < batches.length; index += 1) {
     const batch = batches[index];
+    console.log(
+      `[feishu_docs] request_id=${requestId || 'n/a'} document_token=${documentToken} batch_index=${index + 1}/${batches.length} batch_size=${batch.length}`,
+    );
     await callFeishuJsonApi({
       url: `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentToken)}/blocks/${encodeURIComponent(
         documentToken,
@@ -147,6 +160,11 @@ async function createFeishuReviewDocument(options, injectedHelpers = {}) {
     maxTitleLength: docsConfig.maxTitleLength,
   });
   const blocks = convertMarkdownToFeishuDocBlocks(context.reportMarkdown || '');
+  const blocksToAppend = blocks.length ? blocks : [{ type: 'paragraph', text: '销售复盘已完成。' }];
+  const blockSummary = summarizeFeishuDocBlocks(blocksToAppend);
+  console.log(
+    `[feishu_docs] request_id=${context.requestId || 'n/a'} block_count=${blockSummary.blockCount} child_count=${blockSummary.childCount} batch_count=${blockSummary.batchCount}`,
+  );
   const document = await helpers.createDocumentDirectly({
     token,
     title,
@@ -156,9 +174,10 @@ async function createFeishuReviewDocument(options, injectedHelpers = {}) {
   await helpers.appendBlocksToDocument({
     token,
     documentToken: document.documentToken,
-    blocks: blocks.length ? blocks : [{ type: 'paragraph', text: '销售复盘已完成。' }],
+    blocks: blocksToAppend,
     fetchImpl,
     timeoutMs,
+    requestId: context.requestId,
   });
 
   return {
@@ -311,6 +330,7 @@ module.exports = {
   getFeishuDocsConfig,
   buildFeishuReviewDocumentTitle,
   convertMarkdownToFeishuDocBlocks,
+  summarizeFeishuDocBlocks,
   resolveFeishuChatName,
   resolveFeishuSenderDisplayName,
   createDocumentDirectly,

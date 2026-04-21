@@ -9,6 +9,7 @@ const { TosClient } = require('@volcengine/tos-sdk');
 const { normalizeSalesContext, parseSalesContextFromFields, formatSalesContextForPrompt } = require('./sales-context');
 const { buildReviewPrompt } = require('./review-prompt');
 const { submitVolcengineRequestWithRetry } = require('./volcengine-submit-retry');
+const { readAnthropicMessageStream } = require('./anthropic-stream');
 const {
   extractFeishuTextFromContent,
   extractFeishuFileFromContent,
@@ -2167,6 +2168,7 @@ async function callAnthropic({ provider, prompt }) {
   const payload = {
     model: provider.model || 'claude-opus-4-6',
     max_tokens: provider.max_tokens || 128000,
+    stream: true,
     system: '你是销售复盘专家，请严格输出 JSON。',
     messages: [{ role: 'user', content: prompt }],
   };
@@ -2203,8 +2205,7 @@ async function callAnthropic({ provider, prompt }) {
     throw new Error(`Anthropic API error: ${response.status} ${errorText}`.trim());
   }
 
-  const data = await response.json();
-  const text = data?.content?.[0]?.text;
+  const text = await readAnthropicMessageStream(response.body);
   if (!text) throw new Error('Anthropic API response missing content');
   return parseModelJson(text);
 }

@@ -39,6 +39,13 @@ test('Anthropic defaults include upstream retry controls for 524 and similar gat
   assert.match(envExample, /^ANTHROPIC_RETRY_REDUCED_MAX_TOKENS=32768$/m);
 });
 
+test('Anthropic requests use streaming responses to avoid gateway idle timeout', () => {
+  const serverJs = read('server.js');
+  assert.match(serverJs, /const \{ readAnthropicMessageStream \} = require\('\.\/anthropic-stream'\);/);
+  assert.match(serverJs, /stream:\s*true/);
+  assert.match(serverJs, /const text = await readAnthropicMessageStream\(response\.body\);/);
+});
+
 test('Checked-in AI config defaults to Claude Opus 4.6 with 128000 max output tokens', () => {
   const configText = read('config/ai.config.json');
   const config = JSON.parse(configText);

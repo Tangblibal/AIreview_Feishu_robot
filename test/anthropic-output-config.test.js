@@ -26,6 +26,12 @@ test('Review pipeline now treats model output as markdown instead of strict JSON
   assert.doesNotMatch(serverJs, /response_format = \{ type: 'json_object' \}/);
 });
 
+test('Feishu docs flow no longer depends on folder token gate in server handler', () => {
+  const serverJs = read('server.js');
+  assert.match(serverJs, /if \(docsConfig\.enabled\) \{/);
+  assert.doesNotMatch(serverJs, /docsConfig\.enabled && docsConfig\.folderToken/);
+});
+
 test('Anthropic defaults include upstream retry controls for 524 and similar gateway failures', () => {
   const serverJs = read('server.js');
   const envExample = read('.env.example');

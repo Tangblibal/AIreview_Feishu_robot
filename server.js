@@ -1545,7 +1545,7 @@ async function handleFeishuBotMessageEvent(payload, config, requestId) {
     });
     const docsConfig = getFeishuDocsConfig(readEnvString, readEnvBoolean, readEnvNumber);
     let replyPayload;
-    if (docsConfig.enabled && docsConfig.folderToken) {
+    if (docsConfig.enabled) {
       try {
         const token = await getFeishuBotTenantAccessToken(config);
         replyPayload = await buildFeishuReviewReply({

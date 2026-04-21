@@ -27,3 +27,10 @@ test('buildReviewPrompt loads template file and replaces placeholders', () => {
   assert.doesNotMatch(prompt, /\$\{templateBlock\}/);
   assert.doesNotMatch(prompt, /\$\{transcriptText\}/);
 });
+
+test('review prompt template no longer requires JSON output', () => {
+  const template = fs.readFileSync(REVIEW_PROMPT_TEMPLATE_PATH, 'utf8');
+  assert.match(template, /请直接输出完整 Markdown 复盘正文，不要 JSON/);
+  assert.doesNotMatch(template, /必须输出 JSON/);
+  assert.doesNotMatch(template, /"report_markdown": string/);
+});

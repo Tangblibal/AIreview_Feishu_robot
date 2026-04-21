@@ -532,21 +532,9 @@ ${transcriptText}
 ---
 
 【输出要求】
-必须输出 JSON（不要输出多余文本），结构如下：
-{
-  "total": number,
-  "need": number,
-  "style": number,
-  "objection": number,
-  "close": number,
-  "status": string,
-  "insights": [
-    { "title": string, "content": string, "logic": string, "script": string, "tag": string }
-  ],
-  "report_markdown": string
-}
+请直接输出完整 Markdown 复盘正文，不要 JSON，不要代码块包裹，不要额外解释。
 
 说明：
-- report_markdown 必须严格按上面的 Output Structure 组织为 Markdown。
-- insights 中每一项必须包含 logic（底层逻辑分析）与 script（满分话术模板）。
-- 如果对话转写为空或信息不足，请在 status 中明确说明，insights 置空，report_markdown 说明信息不足。
+- 输出内容必须是可直接写入飞书云文档的完整复盘正文。
+- 保持你在本提示词中定义的复盘结构、标题层级、问题诊断、底层逻辑、满分示范话术和举一反三内容。
+- 如果对话转写为空或信息不足，请直接用 Markdown 明确说明信息不足，并尽可能给出方向性建议。

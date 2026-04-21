@@ -10,6 +10,7 @@ const { normalizeSalesContext, parseSalesContextFromFields, formatSalesContextFo
 const { buildReviewPrompt } = require('./review-prompt');
 const { submitVolcengineRequestWithRetry } = require('./volcengine-submit-retry');
 const { readAnthropicMessageStream } = require('./anthropic-stream');
+const { writeReviewDebugArtifact } = require('./review-debug-export');
 const {
   extractFeishuTextFromContent,
   extractFeishuFileFromContent,
@@ -32,6 +33,7 @@ const CONFIG_PATH = path.join(__dirname, 'config', 'ai.config.json');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const SESSION_COOKIE_NAME = 'lumo_session';
 const REDIS_URL = process.env.REDIS_URL || process.env.RAILWAY_REDIS_URL || '';
+const REVIEW_DEBUG_EXPORT_DIR = `${process.env.REVIEW_DEBUG_EXPORT_DIR || ''}`.trim();
 
 const sessionStore = new Map();
 const oauthStateStore = new Map();
@@ -2568,6 +2570,20 @@ async function runSingleReviewPipeline(payload) {
     console.log(
       `[review_pipeline] request_id=${payload?.requestId || 'n/a'} provider=${provider.type || 'unknown'} model=${provider.model || 'unknown'} report_length=${`${report.report_markdown || ''}`.length} status=${report.status || 'unknown'}`,
     );
+    const debugExport = await writeReviewDebugArtifact({
+      exportDir: REVIEW_DEBUG_EXPORT_DIR,
+      requestId: payload?.requestId || '',
+      provider,
+      transcript,
+      enrichedTranscript,
+      prompt,
+      report,
+    });
+    if (debugExport.written) {
+      console.log(
+        `[review_debug] request_id=${payload?.requestId || 'n/a'} exported file=${debugExport.filePath}`,
+      );
+    }
 
     return {
       report,

@@ -15,3 +15,8 @@ test('feishu docs logs block diagnostics before append', () => {
   assert.match(feishuDocsJs, /\[feishu_docs\].*block_count=/);
   assert.match(feishuDocsJs, /\[feishu_docs\].*batch_index=/);
 });
+
+test('review pipeline exports raw debug artifact when debug dir is enabled', () => {
+  assert.match(serverJs, /writeReviewDebugArtifact/);
+  assert.match(serverJs, /\[review_debug\].*exported file=/);
+});

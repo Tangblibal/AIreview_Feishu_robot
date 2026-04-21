@@ -108,7 +108,7 @@ test('createFeishuReviewDocument falls back to audio filename when chat metadata
   assert.equal(result.fallbackUsed, true);
 });
 
-test('appendBlocksToDocument splits children into batches of 50', async () => {
+test('appendBlocksToDocument splits children into batches of 20', async () => {
   const requests = [];
   const blocks = Array.from({ length: 51 }, (_, index) => ({
     type: 'paragraph',
@@ -120,6 +120,7 @@ test('appendBlocksToDocument splits children into batches of 50', async () => {
     documentToken: 'doc_batch',
     blocks,
     timeoutMs: 30000,
+    sleepImpl: async () => {},
     fetchImpl: async (url, options) => {
       requests.push({
         url,
@@ -132,11 +133,82 @@ test('appendBlocksToDocument splits children into batches of 50', async () => {
     },
   });
 
-  assert.equal(requests.length, 2);
-  assert.equal(requests[0].body.children.length, 50);
+  assert.equal(requests.length, 3);
+  assert.equal(requests[0].body.children.length, 20);
   assert.equal(requests[0].body.index, 0);
-  assert.equal(requests[1].body.children.length, 1);
-  assert.equal(requests[1].body.index, 50);
+  assert.equal(requests[1].body.children.length, 20);
+  assert.equal(requests[1].body.index, 20);
+  assert.equal(requests[2].body.children.length, 11);
+  assert.equal(requests[2].body.index, 40);
+});
+
+test('appendBlocksToDocument retries rate-limited batch and eventually succeeds', async () => {
+  const requests = [];
+  const delays = [];
+
+  await appendBlocksToDocument({
+    token: 'tenant_x',
+    documentToken: 'doc_retry',
+    blocks: [{ type: 'paragraph', text: '第一段' }],
+    timeoutMs: 30000,
+    sleepImpl: async (ms) => {
+      delays.push(ms);
+    },
+    fetchImpl: async (url, options) => {
+      requests.push({
+        url,
+        body: JSON.parse(options.body),
+      });
+      if (requests.length === 1) {
+        return {
+          ok: false,
+          status: 429,
+          text: async () => 'too many requests',
+          headers: {
+            get(name) {
+              return name.toLowerCase() === 'retry-after' ? '1' : '';
+            },
+          },
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ code: 0, data: {} }),
+        headers: { get: () => '' },
+      };
+    },
+  });
+
+  assert.equal(requests.length, 2);
+  assert.equal(delays.length, 1);
+  assert.equal(delays[0], 1000);
+});
+
+test('appendBlocksToDocument throws after exhausting retries for rate-limited batch', async () => {
+  const delays = [];
+
+  await assert.rejects(
+    appendBlocksToDocument({
+      token: 'tenant_x',
+      documentToken: 'doc_retry_fail',
+      blocks: [{ type: 'paragraph', text: '第一段' }],
+      timeoutMs: 30000,
+      maxAttempts: 2,
+      retryBaseMs: 250,
+      sleepImpl: async (ms) => {
+        delays.push(ms);
+      },
+      fetchImpl: async () => ({
+        ok: false,
+        status: 429,
+        text: async () => 'too many requests',
+        headers: { get: () => '' },
+      }),
+    }),
+    /429/,
+  );
+
+  assert.deepEqual(delays, [250]);
 });
 
 test('summarizeFeishuDocBlocks reports block and batch counts', () => {

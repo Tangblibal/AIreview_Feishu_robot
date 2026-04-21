@@ -7,6 +7,11 @@ function getFeishuDocsConfig(readEnvString, readEnvBoolean, readEnvNumber) {
     maxTitleLength: readEnvNumber('FEISHU_DOCS_MAX_TITLE_LENGTH') || 100,
     replyMode: readEnvString('FEISHU_DOCS_REPLY_MODE') || 'link_with_summary',
     requestTimeoutMs: readEnvNumber('FEISHU_DOCS_REQUEST_TIMEOUT_MS') || 30000,
+    appendBatchSize: readEnvNumber('FEISHU_DOCS_APPEND_BATCH_SIZE') || 20,
+    appendRetryMaxAttempts: readEnvNumber('FEISHU_DOCS_APPEND_RETRY_MAX_ATTEMPTS') || 5,
+    appendRetryBaseMs: readEnvNumber('FEISHU_DOCS_APPEND_RETRY_BASE_MS') || 500,
+    appendRetryMaxBackoffMs: readEnvNumber('FEISHU_DOCS_APPEND_RETRY_MAX_BACKOFF_MS') || 8000,
+    appendInterBatchDelayMs: readEnvNumber('FEISHU_DOCS_APPEND_INTER_BATCH_DELAY_MS') || 200,
   };
 }
 
@@ -32,13 +37,14 @@ function convertMarkdownToFeishuDocBlocks(markdown) {
   return splitIntoSimpleBlocks(markdown).map(toFeishuBlock);
 }
 
-function summarizeFeishuDocBlocks(blocks) {
+function summarizeFeishuDocBlocks(blocks, { batchSize = 20 } = {}) {
   const normalizedBlocks = Array.isArray(blocks) ? blocks : [];
   const children = normalizeFeishuBlockPayload(normalizedBlocks);
+  const safeBatchSize = Math.max(1, Number(batchSize) || 20);
   return {
     blockCount: normalizedBlocks.length,
     childCount: children.length,
-    batchCount: children.length ? splitIntoChunks(children, 50).length : 0,
+    batchCount: children.length ? splitIntoChunks(children, safeBatchSize).length : 0,
   };
 }
 
@@ -103,29 +109,104 @@ async function createDocumentDirectly({ token, title, fetchImpl, timeoutMs }) {
   };
 }
 
-async function appendBlocksToDocument({ token, documentToken, blocks, fetchImpl, timeoutMs, requestId }) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(retryAfterValue) {
+  const raw = `${retryAfterValue || ''}`.trim();
+  if (!raw) return 0;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000);
+  }
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+  return 0;
+}
+
+function buildBackoffMs(attempt, baseMs, maxBackoffMs) {
+  const safeBase = Math.max(100, Number(baseMs) || 500);
+  const safeMax = Math.max(safeBase, Number(maxBackoffMs) || 8000);
+  const factor = 2 ** Math.max(0, attempt - 1);
+  return Math.min(safeMax, safeBase * factor);
+}
+
+function shouldRetryFeishuDocAppend(error) {
+  const status = Number(error?.status || 0);
+  if ([429, 500, 502, 503, 504].includes(status)) return true;
+  const message = `${error?.message || ''}`.toLowerCase();
+  return (
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('aborted') ||
+    message.includes('rate limit') ||
+    message.includes('too many requests')
+  );
+}
+
+async function appendBlocksToDocument({
+  token,
+  documentToken,
+  blocks,
+  fetchImpl,
+  timeoutMs,
+  requestId,
+  batchSize = 20,
+  maxAttempts = 5,
+  retryBaseMs = 500,
+  retryMaxBackoffMs = 8000,
+  interBatchDelayMs = 200,
+  sleepImpl,
+}) {
+  const sleepFn = sleepImpl || sleep;
   const children = normalizeFeishuBlockPayload(blocks);
   if (!children.length) return;
-  const batches = splitIntoChunks(children, 50);
+  const safeBatchSize = Math.max(1, Number(batchSize) || 20);
+  const batches = splitIntoChunks(children, safeBatchSize);
   for (let index = 0; index < batches.length; index += 1) {
     const batch = batches[index];
-    console.log(
-      `[feishu_docs] request_id=${requestId || 'n/a'} document_token=${documentToken} batch_index=${index + 1}/${batches.length} batch_size=${batch.length}`,
-    );
-    await callFeishuJsonApi({
-      url: `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentToken)}/blocks/${encodeURIComponent(
-        documentToken,
-      )}/children`,
-      token,
-      fetchImpl,
-      timeoutMs,
-      method: 'POST',
-      body: {
-        index: index * 50,
-        children: batch,
-      },
-      errorLabel: 'Feishu document append',
-    });
+    const totalAttempts = Math.max(1, Number(maxAttempts) || 1);
+    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      console.log(
+        `[feishu_docs] request_id=${requestId || 'n/a'} document_token=${documentToken} batch_index=${index + 1}/${batches.length} batch_size=${batch.length} attempt=${attempt}/${totalAttempts}`,
+      );
+      try {
+        await callFeishuJsonApi({
+          url: `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentToken)}/blocks/${encodeURIComponent(
+            documentToken,
+          )}/children`,
+          token,
+          fetchImpl,
+          timeoutMs,
+          method: 'POST',
+          body: {
+            index: index * safeBatchSize,
+            children: batch,
+          },
+          errorLabel: 'Feishu document append',
+        });
+        break;
+      } catch (error) {
+        if (attempt >= totalAttempts || !shouldRetryFeishuDocAppend(error)) {
+          console.error(
+            `[feishu_docs] request_id=${requestId || 'n/a'} document_token=${documentToken} batch_index=${index + 1}/${batches.length} batch_size=${batch.length} attempt=${attempt}/${totalAttempts} append_failed_status=${error?.status || 'unknown'} message=${error.message}`,
+          );
+          throw error;
+        }
+        const retryAfterMs = Math.max(0, Number(error?.retryAfterMs) || 0);
+        const delayMs = retryAfterMs > 0 ? retryAfterMs : buildBackoffMs(attempt, retryBaseMs, retryMaxBackoffMs);
+        console.warn(
+          `[feishu_docs] request_id=${requestId || 'n/a'} document_token=${documentToken} batch_index=${index + 1}/${batches.length} batch_size=${batch.length} attempt=${attempt}/${totalAttempts} append_retry_status=${error?.status || 'unknown'} retry_in_ms=${delayMs}`,
+        );
+        await sleepFn(delayMs);
+      }
+    }
+    if (index < batches.length - 1 && interBatchDelayMs > 0) {
+      await sleepFn(interBatchDelayMs);
+    }
   }
 }
 
@@ -161,7 +242,9 @@ async function createFeishuReviewDocument(options, injectedHelpers = {}) {
   });
   const blocks = convertMarkdownToFeishuDocBlocks(context.reportMarkdown || '');
   const blocksToAppend = blocks.length ? blocks : [{ type: 'paragraph', text: '销售复盘已完成。' }];
-  const blockSummary = summarizeFeishuDocBlocks(blocksToAppend);
+  const blockSummary = summarizeFeishuDocBlocks(blocksToAppend, {
+    batchSize: docsConfig.appendBatchSize,
+  });
   console.log(
     `[feishu_docs] request_id=${context.requestId || 'n/a'} block_count=${blockSummary.blockCount} child_count=${blockSummary.childCount} batch_count=${blockSummary.batchCount}`,
   );
@@ -178,6 +261,11 @@ async function createFeishuReviewDocument(options, injectedHelpers = {}) {
     fetchImpl,
     timeoutMs,
     requestId: context.requestId,
+    batchSize: docsConfig.appendBatchSize,
+    maxAttempts: docsConfig.appendRetryMaxAttempts,
+    retryBaseMs: docsConfig.appendRetryBaseMs,
+    retryMaxBackoffMs: docsConfig.appendRetryMaxBackoffMs,
+    interBatchDelayMs: docsConfig.appendInterBatchDelayMs,
   });
 
   return {
@@ -316,12 +404,17 @@ async function callFeishuJsonApi({ url, token, fetchImpl, timeoutMs, method = 'G
 
   if (!response?.ok) {
     const text = await response?.text?.().catch(() => '');
-    throw new Error(`${errorLabel} failed: ${response?.status || 'unknown'} ${text}`.trim());
+    const error = new Error(`${errorLabel} failed: ${response?.status || 'unknown'} ${text}`.trim());
+    error.status = response?.status || 0;
+    error.retryAfterMs = parseRetryAfterMs(response?.headers?.get?.('retry-after'));
+    throw error;
   }
 
   const payload = await response.json().catch(() => ({}));
   if (payload?.code && payload.code !== 0) {
-    throw new Error(`${errorLabel} failed: ${payload.msg || payload.code}`);
+    const error = new Error(`${errorLabel} failed: ${payload.msg || payload.code}`);
+    error.code = payload.code;
+    throw error;
   }
   return payload;
 }

@@ -2,7 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ReadableStream } = require('node:stream/web');
 
-const { extractAnthropicStreamEventText, readAnthropicMessageStream } = require('../anthropic-stream');
+const {
+  extractAnthropicStreamEventText,
+  extractAnthropicStreamEventMeta,
+  readAnthropicMessageStream,
+} = require('../anthropic-stream');
 
 test('extractAnthropicStreamEventText returns delta text from content_block_delta event', () => {
   const eventBlock = [
@@ -22,6 +26,16 @@ test('extractAnthropicStreamEventText returns initial text from content_block_st
   ].join('\n');
 
   assert.equal(extractAnthropicStreamEventText(eventBlock), '{');
+});
+
+test('extractAnthropicStreamEventMeta returns stop reason from message_delta event', () => {
+  const eventBlock = [
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}',
+    '',
+  ].join('\n');
+
+  assert.deepEqual(extractAnthropicStreamEventMeta(eventBlock), { stopReason: 'max_tokens' });
 });
 
 test('readAnthropicMessageStream concatenates Anthropic SSE text deltas across chunks', async () => {
@@ -46,6 +60,8 @@ test('readAnthropicMessageStream concatenates Anthropic SSE text deltas across c
             'data: {"type":"ping"}\r\n\r\n',
             'event: content_block_delta\r\n',
             'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"true}"}}\r\n\r\n',
+            'event: message_delta\r\n',
+            'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\r\n\r\n',
             'event: message_stop\r\n',
             'data: {"type":"message_stop"}\r\n\r\n',
           ].join(''),
@@ -55,8 +71,9 @@ test('readAnthropicMessageStream concatenates Anthropic SSE text deltas across c
     },
   });
 
-  const text = await readAnthropicMessageStream(stream);
-  assert.equal(text, '{"ok":true}');
+  const result = await readAnthropicMessageStream(stream);
+  assert.equal(result.text, '{"ok":true}');
+  assert.equal(result.stopReason, 'end_turn');
 });
 
 test('readAnthropicMessageStream throws upstream error payload from error event', async () => {

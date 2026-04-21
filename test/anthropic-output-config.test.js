@@ -58,7 +58,9 @@ test('Anthropic requests use streaming responses to avoid gateway idle timeout',
   const serverJs = read('server.js');
   assert.match(serverJs, /const \{ readAnthropicMessageStream \} = require\('\.\/anthropic-stream'\);/);
   assert.match(serverJs, /stream:\s*true/);
-  assert.match(serverJs, /const text = await readAnthropicMessageStream\(response\.body\);/);
+  assert.match(serverJs, /return readAnthropicMessageStream\(response\.body\);/);
+  assert.match(serverJs, /if \(result\?\.stopReason !== 'max_tokens'\) \{/);
+  assert.match(serverJs, /请从刚才中断的位置继续输出剩余 Markdown 正文/);
 });
 
 test('Checked-in AI config defaults to Claude Opus 4.6 with 128000 max output tokens', () => {

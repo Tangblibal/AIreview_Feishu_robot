@@ -2133,13 +2133,6 @@ async function callOpenAICompatible({ provider, prompt }) {
 async function callAnthropic({ provider, prompt }) {
   const baseUrl = provider.base_url || 'https://ai.comfly.chat/v1';
   const url = `${baseUrl.replace(/\/$/, '')}/messages`;
-  const payload = {
-    model: provider.model || 'claude-opus-4-6',
-    max_tokens: provider.max_tokens || 128000,
-    stream: true,
-    system: '你是销售复盘专家，请直接输出完整 Markdown 复盘正文，不要 JSON，不要额外解释。',
-    messages: [{ role: 'user', content: prompt }],
-  };
   const authHeader = provider.auth_header || 'x-api-key';
   const authPrefix =
     provider.auth_prefix === undefined
@@ -2157,25 +2150,53 @@ async function callAnthropic({ provider, prompt }) {
   if (provider.extra_headers && typeof provider.extra_headers === 'object') {
     Object.assign(headers, provider.extra_headers);
   }
+  const sendAnthropicRequest = async (messages) => {
+    const payload = {
+      model: provider.model || 'claude-opus-4-6',
+      max_tokens: provider.max_tokens || 128000,
+      stream: true,
+      system: '你是销售复盘专家，请直接输出完整 Markdown 复盘正文，不要 JSON，不要额外解释。',
+      messages,
+    };
 
-  const response = await fetchWithTimeout(
-    url,
-    {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    },
-    provider.timeout_ms || 600000,
-  );
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      },
+      provider.timeout_ms || 600000,
+    );
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => '');
-    throw new Error(`Anthropic API error: ${response.status} ${errorText}`.trim());
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(`Anthropic API error: ${response.status} ${errorText}`.trim());
+    }
+
+    return readAnthropicMessageStream(response.body);
+  };
+
+  const messages = [{ role: 'user', content: prompt }];
+  const continuationPrompt = '请从刚才中断的位置继续输出剩余 Markdown 正文，不要重复已经输出过的内容，不要重写开头。';
+  const maxContinuationRounds = Math.max(1, provider.continuation_rounds || 4);
+  let combinedText = '';
+
+  for (let round = 0; round < maxContinuationRounds; round += 1) {
+    const result = await sendAnthropicRequest(messages);
+    const chunkText = `${result?.text || ''}`;
+    combinedText += chunkText;
+    if (!combinedText.trim()) {
+      throw new Error('Anthropic API response missing content');
+    }
+    if (result?.stopReason !== 'max_tokens') {
+      break;
+    }
+    messages.push({ role: 'assistant', content: chunkText });
+    messages.push({ role: 'user', content: continuationPrompt });
   }
 
-  const text = await readAnthropicMessageStream(response.body);
-  if (!text) throw new Error('Anthropic API response missing content');
-  return `${text}`.trim();
+  return combinedText.trim();
 }
 
 async function callModelWithRetry({ provider, prompt }) {
